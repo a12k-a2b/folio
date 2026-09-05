@@ -1,0 +1,8 @@
+<resources>
+    <style name="Theme.Folio" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">#F2EFE6</item>
+        <item name="android:navigationBarColor">#F2EFE6</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowBackground">#F2EFE6</item>
+    </style>
+</resources>

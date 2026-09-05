@@ -1,0 +1,69 @@
+# deps & toolchains
+node_modules/
+.android-sdk/
+
+# build output
+dist/
+dist-apk/
+.output/
+.vercel/
+.nitro/
+.tanstack/
+artifacts/
+
+# android
+android/app/build/
+android/app/release/
+android/.gradle/
+android/build/
+android/local.properties
+android/captures/
+android/*/build/
+*.apk
+*.aab
+*.ipa
+
+# ios
+ios/build/
+ios/DerivedData/
+ios/*.xcworkspace/xcuserdata/
+ios/*.xcodeproj/xcuserdata/
+ios/*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcuserstate
+
+# env & secrets
+.env
+.env.*
+!.env.example
+
+# logs / os
+*.log
+.DS_Store
+Thumbs.db
+/tmp/
+
+# editor
+.idea/
+.vscode/
+*.swp
+
+# test / qa
+screenshots/
+coverage/
+playwright-report/
+test-results/
+
+# personal / workspace scaffolding
+attachments/
+AGENTS.md
+
+# grok workspace internals (not the app)
+.grok/
+.project_id
+.node_modules.lock
+
+# vibe / local agent
+.vibe/
+.claude/settings.local.json
+.claude/worktrees/
+CLAUDE.local.md
