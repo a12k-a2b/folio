@@ -59,3 +59,10 @@ server-owned.
 
 Railway remains a fine host for the sync service if PowerSync Cloud is too
 much. The protocol matters more than the vendor.
+
+## After the gate: PowerSync is not the default
+
+Specs and adversarial reviews live in [specs/](./specs/). Verdict: **do not
+unlock PowerSync** for two devices and a five-person club. Close three holes
+in HTTP v1 (voice blobs, tombstones, batch push). See [specs/VERDICT.md](./specs/VERDICT.md).
+
