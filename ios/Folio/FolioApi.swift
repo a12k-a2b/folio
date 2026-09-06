@@ -121,6 +121,37 @@ struct FolioApi {
         return (res["id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? v.id
     }
 
+    func push(_ ops: [[String: Any]]) async throws -> [String: Any] {
+        if !signedIn { return [:] }
+        return try await post("/push", body: ["ops": ops])
+    }
+
+    func createBlob(id: String, mime: String, byteLength: Int) async throws -> [String: Any] {
+        try await post("/blobs", body: ["id": id, "mime": mime, "byteLength": byteLength])
+    }
+
+    func putBlob(id: String, data: Data) async throws {
+        guard let url = url("/blobs/\(id)/data") else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "PUT"
+        req.httpBody = data
+        req.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        req.setValue("folio-native/1", forHTTPHeaderField: "X-Folio-Protocol")
+        if !token.isEmpty { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        let (_, res) = try await session.data(for: req)
+        guard let http = res as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw URLError(.badServerResponse)
+        }
+    }
+
+    func completeBlob(id: String) async throws {
+        _ = try await post("/blobs/\(id)/complete", body: [:])
+    }
+
+    func tombstones(_ obj: [String: Any]) -> [[String: Any]] {
+        obj["tombstones"] as? [[String: Any]] ?? []
+    }
+
     func postSettings(_ s: FolioSettings) async throws {
         if !signedIn { return }
         _ = try await post("/settings", body: [

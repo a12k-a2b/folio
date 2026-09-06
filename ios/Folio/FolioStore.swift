@@ -2,7 +2,7 @@ import Foundation
 import Combine
 
 /// File-backed store using the folio_* names from native/PROTOCOL.md.
-/// PowerSync is locked. Local writes set `dirty`; pull never deletes a dirty row.
+/// JSON file in Application Support. PowerSync is locked. HTTP v1.1: blobs, tombstones, batch.
 @MainActor
 final class FolioStore: ObservableObject {
     @Published private(set) var library: [CatalogEntry] = []
@@ -16,6 +16,7 @@ final class FolioStore: ObservableObject {
     private var highlightsStore: [Highlight] = []
     private var bookmarksStore: [Bookmark] = []
     private var voicesStore: [VoiceNote] = []
+    private var pendingDeletes: [[String: String]] = []
     private var meta: [String: String] = [
         "powersync": "locked",
         "protocol": "folio-native/1",
@@ -143,8 +144,9 @@ final class FolioStore: ObservableObject {
         guard let h = highlightsStore.first(where: { $0.id == id }), !h.isCompanion else { return }
         voicesStore.removeAll { $0.highlightId == id && !$0.isCompanion }
         highlightsStore.removeAll { $0.id == id }
+        pendingDeletes.append(["table": "highlights", "id": id, "updatedAt": FolioNow.iso()])
         persist()
-        Task { try? await api().deleteHighlight(id) }
+        Task { try? await api().push([["op": "delete", "table": "highlights", "id": id, "updatedAt": FolioNow.iso()]]) }
     }
 
     @discardableResult
@@ -170,8 +172,9 @@ final class FolioStore: ObservableObject {
 
     func deleteBookmark(_ id: String) {
         bookmarksStore.removeAll { $0.id == id }
+        pendingDeletes.append(["table": "bookmarks", "id": id, "updatedAt": FolioNow.iso()])
         persist()
-        Task { try? await api().deleteBookmark(id) }
+        Task { try? await api().push([["op": "delete", "table": "bookmarks", "id": id, "updatedAt": FolioNow.iso()]]) }
     }
 
     func bookmarkOnPage(bookId: String, chapterIndex: Int, pageIndex: Int) -> Bookmark? {
@@ -220,23 +223,90 @@ final class FolioStore: ObservableObject {
         precondition(powersyncLocked, "PowerSync must stay locked")
         do {
             if let snap = try await client.snapshot(bookId) {
-                unionHighlights(client.mergeSnapshotHighlights(snap), bookId: bookId)
-                unionVoices(client.mergeSnapshotVoices(snap))
+                let remoteHighlights = client.mergeSnapshotHighlights(snap)
+                let remoteVoices = client.mergeSnapshotVoices(snap)
+                for t in client.tombstones(snap) {
+                    guard let table = t["table"] as? String, let id = t["id"] as? String else { continue }
+                    let incoming = (t["updatedAt"] as? String) ?? (t["deletedAt"] as? String) ?? FolioNow.iso()
+                    if table == "highlights" {
+                        if let h = highlightsStore.first(where: { $0.id == id }), h.createdAt > incoming { continue }
+                        highlightsStore.removeAll { $0.id == id }
+                        voicesStore.removeAll { $0.highlightId == id && !$0.isCompanion }
+                    }
+                    if table == "bookmarks" {
+                        if let b = bookmarksStore.first(where: { $0.id == id }), b.createdAt > incoming { continue }
+                        bookmarksStore.removeAll { $0.id == id }
+                    }
+                    if table == "voices" {
+                        if let v = voicesStore.first(where: { $0.id == id }), v.createdAt > incoming { continue }
+                        voicesStore.removeAll { $0.id == id }
+                    }
+                    pendingDeletes.removeAll { $0["id"] == id }
+                }
+                unionHighlights(remoteHighlights, bookId: bookId)
+                unionVoices(remoteVoices)
                 unionBookmarks(client.mergeSnapshotBookmarks(snap), bookId: bookId)
+                remapTheo(remoteHighlights, remoteVoices: remoteVoices)
+            }
+            var ops: [[String: Any]] = pendingDeletes.map {
+                ["op": "delete", "table": $0["table"] ?? "highlights", "id": $0["id"] ?? "", "updatedAt": $0["updatedAt"] ?? FolioNow.iso()]
             }
             for h in highlightsStore where h.dirty && !h.isCompanion && h.bookId == bookId {
-                _ = try await client.pushHighlight(h)
-                markCleanHighlight(h.id)
+                ops.append([
+                    "op": "put", "table": "highlights", "id": h.id, "updatedAt": h.createdAt,
+                    "row": [
+                        "bookId": h.bookId, "chapterId": h.chapterId, "startOffset": h.startOffset,
+                        "endOffset": h.endOffset, "text": h.text, "note": h.note, "authorName": h.authorName,
+                    ],
+                ])
+            }
+            for b in bookmarksStore where b.dirty && b.bookId == bookId {
+                ops.append([
+                    "op": "put", "table": "bookmarks", "id": b.id, "updatedAt": b.createdAt,
+                    "row": [
+                        "bookId": b.bookId, "chapterIndex": b.chapterIndex,
+                        "pageIndex": b.pageIndex, "label": b.label,
+                    ],
+                ])
             }
             for v in voicesStore where v.dirty && !v.isCompanion {
                 let hid = highlightsStore.first(where: { $0.id == v.highlightId })
-                if hid?.bookId == bookId {
-                    _ = try await client.pushVoice(v)
-                    markCleanVoice(v.id)
+                guard hid?.bookId == bookId else { continue }
+                if !v.audioB64.isEmpty, let data = Data(base64Encoded: v.audioB64) {
+                    _ = try? await client.createBlob(id: v.id, mime: v.mime, byteLength: data.count)
+                    try? await client.putBlob(id: v.id, data: data)
+                    try? await client.completeBlob(id: v.id)
                 }
+                ops.append([
+                    "op": "put", "table": "voices", "id": v.id,
+                    "row": [
+                        "highlightId": v.highlightId, "transcript": v.transcript,
+                        "mime": v.mime, "durationMs": v.durationMs, "authorName": v.authorName,
+                    ],
+                ])
             }
             if let p = progressByBook[bookId] {
-                try await client.pushProgress(p)
+                ops.append([
+                    "op": "put", "table": "progress", "id": p.bookId, "updatedAt": p.updatedAt,
+                    "row": [
+                        "bookId": p.bookId, "chapterIndex": p.chapterIndex, "pageIndex": p.pageIndex,
+                        "percent": p.percent, "locator": p.locator, "updatedAt": p.updatedAt,
+                    ],
+                ])
+            }
+            if !ops.isEmpty {
+                let res = try await client.push(ops)
+                let accepted = res["accepted"] as? [[String: Any]] ?? []
+                for a in accepted {
+                    let id = a["id"] as? String ?? ""
+                    let table = a["table"] as? String ?? ""
+                    if table == "highlights" { markCleanHighlight(id) }
+                    if table == "voices" { markCleanVoice(id) }
+                    if table == "bookmarks" { markCleanBookmark(id) }
+                    if table == "highlights" || table == "bookmarks" || table == "voices" {
+                        pendingDeletes.removeAll { $0["id"] == id }
+                    }
+                }
             }
             lastPullAt = FolioNow.iso()
             meta["last_pull_at"] = lastPullAt
@@ -258,6 +328,7 @@ final class FolioStore: ObservableObject {
         var voices: [VoiceNote]
         var settings: FolioSettings
         var meta: [String: String]
+        var pendingDeletes: [[String: String]]?
     }
 
     private func loadOrSeed() {
@@ -274,6 +345,7 @@ final class FolioStore: ObservableObject {
             origin = meta["origin"] ?? ""
             token = meta["token"] ?? ""
             lastPullAt = meta["last_pull_at"] ?? ""
+            pendingDeletes = disk.pendingDeletes ?? []
             meta["powersync"] = "locked"
             meta["protocol"] = "folio-native/1"
             if library.isEmpty { seedLibrary() }
@@ -366,6 +438,29 @@ final class FolioStore: ObservableObject {
         persist()
     }
 
+    private func remapTheo(_ remote: [Highlight], remoteVoices: [VoiceNote]) {
+        let remoteIds = remote.map(\.id)
+        for local in highlightsStore where local.isCompanion {
+            guard let key = ClubSeed.companionKey(local.id),
+                  let hit = remoteIds.first(where: { ClubSeed.companionKey($0) == key }),
+                  hit != local.id,
+                  let i = highlightsStore.firstIndex(where: { $0.id == local.id }) else { continue }
+            let old = local.id
+            highlightsStore[i].id = hit
+            for vi in voicesStore.indices where voicesStore[vi].highlightId == old {
+                voicesStore[vi].highlightId = hit
+            }
+        }
+        let remoteVoiceIds = remoteVoices.map(\.id)
+        for local in voicesStore where local.isCompanion {
+            guard let key = ClubSeed.companionKey(local.id),
+                  let hit = remoteVoiceIds.first(where: { ClubSeed.companionKey($0) == key }),
+                  hit != local.id,
+                  let i = voicesStore.firstIndex(where: { $0.id == local.id }) else { continue }
+            voicesStore[i].id = hit
+        }
+    }
+
     private func unionVoices(_ remote: [VoiceNote]) {
         let localIds = Set(voicesStore.map(\.id))
         for var v in remote {
@@ -423,7 +518,8 @@ final class FolioStore: ObservableObject {
             bookmarks: bookmarksStore,
             voices: voicesStore,
             settings: settings,
-            meta: meta
+            meta: meta,
+            pendingDeletes: pendingDeletes
         )
         do {
             let data = try JSONEncoder().encode(disk)

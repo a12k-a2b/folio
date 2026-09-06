@@ -8,7 +8,7 @@
 {
   "powersync": "locked",
   "powersyncLocked": true,
-  "reason": "HTTP v1 pull/push is the sync until both native apps keep a mark overnight on device."
+  "reason": "HTTP v1.1 (blobs, tombstones, batch). PowerSync stays locked until both native apps keep a mark overnight on device."
 }
 ```
 
@@ -17,12 +17,12 @@
 Two-way CRDT sync is the right end state (Postgres origin, per-user buckets,
 object storage for voice blobs, last-writer on progress, union on highlights).
 It is the wrong **next** step. A sync engine on top of unproven native stores
-will launder bugs: a Room/SwiftData miss looks like a conflict.
+will launder bugs: a SQLite / JSON-file miss looks like a conflict.
 
 The Kotlin DC-1 app and the SwiftUI iPhone app must each:
 
 - open a bundled book offline
-- write a Matter mark into local SQL
+- write a Matter mark into the local store
 - survive process death
 - push/pull that mark over HTTP v1
 
@@ -30,7 +30,7 @@ before any PowerSync client, connector, or schema is added.
 
 ## What is allowed now
 
-- Local SQLiteOpenHelper (Android) and SwiftData (iOS)
+- Local SQLiteOpenHelper (Android) and a JSON file store (iOS)
 - `dirty` flags and a single `FolioApi.pull(bookId)` / `FolioApi.pushDirty()`
 - The REST surface in [PROTOCOL.md](./PROTOCOL.md)
 

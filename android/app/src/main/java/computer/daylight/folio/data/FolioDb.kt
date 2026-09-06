@@ -8,7 +8,7 @@ import android.database.sqlite.SQLiteOpenHelper
 import org.json.JSONObject
 import java.util.UUID
 
-class FolioDb(context: Context) : SQLiteOpenHelper(context, "folio.db", null, 1) {
+class FolioDb(context: Context) : SQLiteOpenHelper(context, "folio.db", null, 2) {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("""
             create table folio_library (
@@ -37,7 +37,8 @@ class FolioDb(context: Context) : SQLiteOpenHelper(context, "folio.db", null, 1)
               start_offset int not null, end_offset int not null, text text not null,
               note text not null default '', created_at text not null,
               author_id text not null default '', author_name text not null default 'You',
-              club_id text, is_companion int not null default 0, dirty int not null default 1
+              club_id text, is_companion int not null default 0, dirty int not null default 1,
+              updated_at text not null default '', deleted_at text
             )
         """.trimIndent())
         db.execSQL("create table folio_highlight_tags (highlight_id text not null, tag_id text not null, primary key (highlight_id, tag_id))")
@@ -45,7 +46,7 @@ class FolioDb(context: Context) : SQLiteOpenHelper(context, "folio.db", null, 1)
             create table folio_bookmarks (
               id text primary key, book_id text not null, chapter_index int not null,
               page_index int not null, label text not null default '', created_at text not null,
-              dirty int not null default 1
+              dirty int not null default 1, updated_at text not null default '', deleted_at text
             )
         """.trimIndent())
         db.execSQL("""
@@ -55,7 +56,8 @@ class FolioDb(context: Context) : SQLiteOpenHelper(context, "folio.db", null, 1)
               duration_ms int not null default 0, created_at text not null,
               author_id text not null default '', author_name text not null default 'You',
               reply_to text, club_id text, is_companion int not null default 0,
-              audio_url text not null default '', dirty int not null default 1
+              audio_url text not null default '', dirty int not null default 1,
+              updated_at text not null default '', deleted_at text
             )
         """.trimIndent())
         db.execSQL("create table folio_settings (id int primary key, json text not null)")
@@ -64,7 +66,22 @@ class FolioDb(context: Context) : SQLiteOpenHelper(context, "folio.db", null, 1)
         db.execSQL("insert into folio_meta (key, value) values ('protocol', 'folio-native/1')")
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {}
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) {
+            fun add(table: String, col: String, spec: String) {
+                try {
+                    db.execSQL("alter table $table add column $col $spec")
+                } catch (_: Exception) {
+                }
+            }
+            add("folio_highlights", "updated_at", "text not null default ''")
+            add("folio_highlights", "deleted_at", "text")
+            add("folio_bookmarks", "updated_at", "text not null default ''")
+            add("folio_bookmarks", "deleted_at", "text")
+            add("folio_voice_notes", "updated_at", "text not null default ''")
+            add("folio_voice_notes", "deleted_at", "text")
+        }
+    }
 
     fun meta(key: String, fallback: String = ""): String {
         readableDatabase.rawQuery("select value from folio_meta where key = ?", arrayOf(key)).use { c ->
@@ -243,7 +260,7 @@ class FolioDb(context: Context) : SQLiteOpenHelper(context, "folio.db", null, 1)
                 "page_index" to p.pageIndex,
                 "percent" to p.percent,
                 "locator" to p.locator,
-                "updated_at" to nowIso(),
+                "updated_at" to p.updatedAt.ifBlank { nowIso() },
             ),
             SQLiteDatabase.CONFLICT_REPLACE,
         )
@@ -302,7 +319,7 @@ class FolioDb(context: Context) : SQLiteOpenHelper(context, "folio.db", null, 1)
         }
         val out = mutableListOf<Highlight>()
         readableDatabase.rawQuery(
-            "select * from folio_highlights where book_id = ? order by created_at asc",
+            "select * from folio_highlights where book_id = ? and (deleted_at is null or deleted_at = '') order by created_at asc",
             arrayOf(bookId),
         ).use { c ->
             while (c.moveToNext()) {
@@ -346,34 +363,105 @@ class FolioDb(context: Context) : SQLiteOpenHelper(context, "folio.db", null, 1)
                 "club_id" to h.clubId,
                 "is_companion" to if (h.isCompanion) 1 else 0,
                 "dirty" to if (h.dirty) 1 else 0,
+                "updated_at" to h.createdAt,
+                "deleted_at" to null,
             ),
             SQLiteDatabase.CONFLICT_REPLACE,
         )
     }
 
     fun updateHighlight(id: String, note: String?, tagIds: List<String>?) {
+        val now = nowIso()
         if (note != null) {
-            writableDatabase.execSQL("update folio_highlights set note = ?, dirty = 1 where id = ? and is_companion = 0", arrayOf(note, id))
+            writableDatabase.execSQL(
+                "update folio_highlights set note = ?, dirty = 1, updated_at = ? where id = ? and is_companion = 0",
+                arrayOf(note, now, id),
+            )
         }
         if (tagIds != null) {
             writableDatabase.execSQL("delete from folio_highlight_tags where highlight_id = ?", arrayOf(id))
             tagIds.forEach {
                 writableDatabase.insert("folio_highlight_tags", null, cv("highlight_id" to id, "tag_id" to it))
             }
-            writableDatabase.execSQL("update folio_highlights set dirty = 1 where id = ?", arrayOf(id))
+            writableDatabase.execSQL("update folio_highlights set dirty = 1, updated_at = ? where id = ?", arrayOf(now, id))
         }
     }
 
     fun deleteHighlight(id: String) {
-        writableDatabase.execSQL("delete from folio_voice_notes where highlight_id = ? and is_companion = 0", arrayOf(id))
-        writableDatabase.execSQL("delete from folio_highlight_tags where highlight_id = ?", arrayOf(id))
-        writableDatabase.execSQL("delete from folio_highlights where id = ? and is_companion = 0", arrayOf(id))
+        val now = nowIso()
+        writableDatabase.execSQL(
+            "update folio_voice_notes set deleted_at = ?, updated_at = ?, dirty = 1 where highlight_id = ? and is_companion = 0",
+            arrayOf(now, now, id),
+        )
+        writableDatabase.execSQL(
+            "update folio_highlights set deleted_at = ?, updated_at = ?, dirty = 1 where id = ? and is_companion = 0",
+            arrayOf(now, now, id),
+        )
+    }
+
+    fun applyTombstone(table: String, id: String, incomingUpdatedAt: String? = null) {
+        val allowed = setOf("folio_highlights", "folio_bookmarks", "folio_voice_notes")
+        require(table in allowed) { "bad table" }
+        val incoming = incomingUpdatedAt?.takeIf { it.isNotBlank() }
+        if (incoming != null) {
+            readableDatabase.rawQuery(
+                "select coalesce(nullif(updated_at, ''), created_at) from $table where id = ?",
+                arrayOf(id),
+            ).use { c ->
+                if (c.moveToFirst()) {
+                    val local = c.getString(0) ?: ""
+                    if (local.isNotBlank() && local > incoming) return
+                }
+            }
+        }
+        val stamp = incoming ?: nowIso()
+        writableDatabase.execSQL(
+            "update $table set deleted_at = ?, updated_at = ?, dirty = 0 where id = ?",
+            arrayOf(stamp, stamp, id),
+        )
+    }
+
+    fun remapRow(table: String, from: String, to: String) {
+        val allowed = setOf("folio_highlights", "folio_bookmarks", "folio_voice_notes")
+        require(table in allowed) { "bad table" }
+        writableDatabase.execSQL("update $table set id = ? where id = ?", arrayOf(to, from))
+    }
+
+    fun remapVoiceParent(from: String, to: String) {
+        writableDatabase.execSQL(
+            "update folio_voice_notes set highlight_id = ? where highlight_id = ?",
+            arrayOf(to, from),
+        )
+    }
+
+    fun companionVoices(): List<Pair<String, String>> {
+        val out = mutableListOf<Pair<String, String>>()
+        readableDatabase.rawQuery(
+            "select id, highlight_id from folio_voice_notes where is_companion = 1",
+            null,
+        ).use { c ->
+            while (c.moveToNext()) out += c.getString(0) to c.getString(1)
+        }
+        return out
+    }
+
+    fun dirtyDeletes(table: String): List<String> {
+        val allowed = setOf("folio_highlights", "folio_bookmarks", "folio_voice_notes")
+        require(table in allowed) { "bad table" }
+        val out = mutableListOf<String>()
+        readableDatabase.rawQuery(
+            "select id from $table where dirty = 1 and deleted_at is not null and deleted_at != ''",
+            null,
+        ).use { c ->
+            while (c.moveToNext()) out += c.getString(0)
+        }
+        return out
     }
 
     fun bookmarks(bookId: String): List<Bookmark> {
         val out = mutableListOf<Bookmark>()
         readableDatabase.rawQuery(
-            "select * from folio_bookmarks where book_id = ? order by created_at desc",
+            "select * from folio_bookmarks where book_id = ? and (deleted_at is null or deleted_at = '') order by created_at desc",
             arrayOf(bookId),
         ).use { c ->
             while (c.moveToNext()) {
@@ -398,14 +486,18 @@ class FolioDb(context: Context) : SQLiteOpenHelper(context, "folio.db", null, 1)
             cv(
                 "id" to b.id, "book_id" to b.bookId, "chapter_index" to b.chapterIndex,
                 "page_index" to b.pageIndex, "label" to b.label, "created_at" to b.createdAt,
-                "dirty" to if (b.dirty) 1 else 0,
+                "dirty" to if (b.dirty) 1 else 0, "updated_at" to b.createdAt, "deleted_at" to null,
             ),
             SQLiteDatabase.CONFLICT_REPLACE,
         )
     }
 
     fun deleteBookmark(id: String) {
-        writableDatabase.execSQL("delete from folio_bookmarks where id = ?", arrayOf(id))
+        val now = nowIso()
+        writableDatabase.execSQL(
+            "update folio_bookmarks set deleted_at = ?, updated_at = ?, dirty = 1 where id = ?",
+            arrayOf(now, now, id),
+        )
     }
 
     fun voices(bookId: String): List<VoiceNote> {
@@ -414,7 +506,7 @@ class FolioDb(context: Context) : SQLiteOpenHelper(context, "folio.db", null, 1)
             """
             select v.* from folio_voice_notes v
             join folio_highlights h on h.id = v.highlight_id
-            where h.book_id = ?
+            where h.book_id = ? and (v.deleted_at is null or v.deleted_at = '')
             """.trimIndent(),
             arrayOf(bookId),
         ).use { c ->
@@ -450,7 +542,7 @@ class FolioDb(context: Context) : SQLiteOpenHelper(context, "folio.db", null, 1)
                 "created_at" to v.createdAt, "author_id" to v.authorId, "author_name" to v.authorName,
                 "reply_to" to v.replyTo, "club_id" to v.clubId,
                 "is_companion" to if (v.isCompanion) 1 else 0, "audio_url" to v.audioUrl,
-                "dirty" to if (v.dirty) 1 else 0,
+                "dirty" to if (v.dirty) 1 else 0, "updated_at" to v.createdAt, "deleted_at" to null,
             ),
             SQLiteDatabase.CONFLICT_REPLACE,
         )
@@ -465,6 +557,8 @@ class FolioDb(context: Context) : SQLiteOpenHelper(context, "folio.db", null, 1)
     }
 
     fun markClean(table: String, id: String) {
+        val allowed = setOf("folio_highlights", "folio_bookmarks", "folio_voice_notes")
+        require(table in allowed) { "bad table" }
         writableDatabase.execSQL("update $table set dirty = 0 where id = ?", arrayOf(id))
     }
 }

@@ -19,7 +19,7 @@ Android assets and iOS resources). A device with no account still:
 
 - opens the six bundled books
 - paginates with native text (Compose `TextMeasurer` / CoreText frames)
-- writes marks, bookmarks, tags, voice notes, progress to local SQLite / SwiftData
+- writes marks, bookmarks, tags, voice notes, progress to local SQLite (Android) or a JSON file (iOS)
 - plays Theo’s companion notes from bundled `voices/theo-*.mp3`
 
 Sign-in is only required to **push** and **pull** against the origin.
@@ -43,19 +43,25 @@ CORS: `*` with `Authorization, Content-Type, X-Folio-Protocol`.
 
 | Method | Path | Auth | Body / result |
 | --- | --- | --- | --- |
-| GET | `/health` | no | `{ ok, protocol, powersync, powersyncLocked, catalogSize, time }` |
+| GET | `/health` | no | `{ ok, protocol, sync: "v1.1", powersync, powersyncLocked, catalogSize, time }` |
 | GET | `/catalog` | no | `{ protocol, books: CatalogEntry[] }` — no HTML |
 | GET | `/catalog/:bookId` | no | `{ protocol, book: Book }` — full chapters |
 | GET | `/me` | no (200 either way) | `{ signedIn, userId, email, displayName }` — unsigned returns `signedIn: false`, not 401 |
 | GET | `/library` | yes | `{ books, progress, settings, clubs }` |
-| GET | `/snapshot/:bookId` | yes | book bundle: `{ book, highlights, bookmarks, tags, voices, club }` |
-| POST | `/progress` | yes | `Progress` — last writer wins |
+| GET | `/snapshot/:bookId` | yes | `{ book, highlights, bookmarks, tags, voices, club, tombstones }` — voices have `audioUrl`, never `audioB64` |
+| POST | `/progress` | yes | `Progress` — last writer on **client** `updatedAt` wins. Stale push returns `{ stale: true, progress }` |
 | POST | `/highlights` | yes | highlight (client may send `id`) → `{ id, clubId }` |
 | PATCH | `/highlights/:id` | yes | `{ note?, tagIds? }` → `{ ok }` |
-| DELETE | `/highlights/:id` | yes | `{ ok }` — refuses companion rows |
+| DELETE | `/highlights/:id` | yes | `{ ok }` — tombstone. Refuses companion (403) |
 | POST | `/bookmarks` | yes | `{ bookId, chapterIndex, pageIndex, label, id? }` → `{ id }` |
-| DELETE | `/bookmarks/:id` | yes | `{ ok }` |
-| POST | `/voices` | yes | voice note (client may send `id`) → `{ id }` |
+| DELETE | `/bookmarks/:id` | yes | `{ ok }` — tombstone |
+| POST | `/voices` | yes | metadata after blob is `ready`. `audioB64` is ingested as a blob then dropped. `{ id }` or 409 `blob_missing` |
+| DELETE | `/voices/:id` | yes | `{ ok }` — tombstone. Companion 403 |
+| POST | `/blobs` | yes | `{ id?, mime, byteLength, sha256? }` → `{ id, putUrl, getUrl, expiresAt }` |
+| PUT | `/blobs/:id/data` | yes | raw bytes, max 2.4MB. Does **not** mark ready |
+| POST | `/blobs/:id/complete` | yes | verifies bytes, sets `ready` |
+| GET | `/blobs/:id` | yes | audio bytes if ready and visible |
+| POST | `/push` | yes | `{ ops[] }` → `{ accepted[], rejected[] }`. Each op commits. A missing blob rejects **that** op only |
 | GET | `/tags` | yes | `{ tags }` |
 | POST | `/tags` | yes | `{ name, emoji, kind, id? }` → `{ id }` |
 | DELETE | `/tags?id=` | yes | `{ ok }` |
@@ -122,10 +128,20 @@ Conflict: last writer on the origin wins. Native keeps a local copy always.
 
 ## Voice note
 
-`audioB64` max ~2.4MB. `audioUrl` is origin-absolute after pull (Theo’s MP3s).
-Native also ships those files under `voices/` so the club works offline.
+`audioB64` max ~2.4MB is accepted only as a one-step ingest that writes `folio_blobs` then stores an empty row column. Prefer the two-step blob API. `audioUrl` is origin-absolute after pull (Theo’s MP3s). Native also ships those files under `voices/` so the club works offline.
 
-## Local SQL (Android SQLiteOpenHelper / iOS SwiftData mapped to the same names)
+## v1.1 sync (still `folio-native/1`)
+
+Health reports `sync: "v1.1"`. PowerSync stays locked.
+
+- **Blobs.** Voice bytes live in `folio_blobs`, not on the voice row. PUT then POST complete. A 409 `blob_missing` never blocks a bookmark in `/push`.
+- **Tombstones.** Deletes set `deleted_at`. Snapshot lists live rows plus `tombstones`. Pull applies a tombstone even if the id is dirty, when the tombstone’s `updatedAt` is newer.
+- **Batch.** `POST /push` with up to 100 ops. Partial success is normal. Poison op is rejected; the rest drain.
+- **Progress.** Last writer is the client `updatedAt`, not server `now()`.
+- **Companion ids.** Bundled `theo-hl-feeling` and origin `theo-hl-feeling-<club>` are the same note. On pull, adopt the origin id.
+- **No long-poll.** Drain on resume and on wifi. Opening the book is the sync.
+
+## Local SQL (Android SQLiteOpenHelper / iOS JSON file mapped to the same names)
 
 ```
 folio_library(id, book_id, source, title, author, description, cover_label, added_at)
@@ -141,8 +157,8 @@ folio_meta(key, value)  -- origin, token, last_pull_at, powersync = "locked"
 ```
 
 `dirty` is local-only: 1 after an offline write, 0 after a successful POST.
-Pull never deletes a local dirty row. Union on highlights (never drop a mark
-the other device still has). Last-writer on progress.
+Pull applies `tombstones` even if the id is dirty, when the tombstone `updatedAt` is newer.
+Last-writer on progress uses the client `updatedAt`.
 
 ## Matter gestures (both apps)
 

@@ -78,6 +78,33 @@ class FolioApi(
         return res.optString("id").ifBlank { v.id }
     }
 
+    fun push(ops: JSONArray): JSONObject {
+        if (!signedIn()) return JSONObject()
+        return post("/push", JSONObject().put("ops", ops))
+    }
+
+    fun createBlob(id: String, mime: String, byteLength: Int): JSONObject {
+        return post(
+            "/blobs",
+            JSONObject().put("id", id).put("mime", mime).put("byteLength", byteLength),
+        )
+    }
+
+    fun putBlob(id: String, bytes: ByteArray) {
+        val req = Request.Builder()
+            .url(url("/blobs/$id/data"))
+            .apply { headers() }
+            .put(bytes.toRequestBody("application/octet-stream".toMediaType()))
+            .build()
+        client.newCall(req).execute().use { res ->
+            if (!res.isSuccessful) throw ApiException(res.code, res.body?.string().orEmpty())
+        }
+    }
+
+    fun completeBlob(id: String): JSONObject = post("/blobs/$id/complete", JSONObject())
+
+    fun tombstones(obj: JSONObject): JSONArray = obj.optJSONArray("tombstones") ?: JSONArray()
+
     fun snapshot(bookId: String): JSONObject? {
         if (!signedIn()) return null
         return get("/snapshot/${bookId}")

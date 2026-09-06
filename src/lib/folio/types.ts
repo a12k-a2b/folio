@@ -74,6 +74,8 @@ export type Highlight = {
   authorName: string;
   clubId: string | null;
   isCompanion: boolean;
+  updatedAt?: string;
+  deletedAt?: string | null;
 };
 
 export type Bookmark = {
@@ -83,6 +85,8 @@ export type Bookmark = {
   pageIndex: number;
   label: string;
   createdAt: string;
+  updatedAt?: string;
+  deletedAt?: string | null;
 };
 
 export type VoiceNote = {
@@ -99,6 +103,17 @@ export type VoiceNote = {
   replyTo: string | null;
   clubId: string | null;
   isCompanion: boolean;
+  updatedAt?: string;
+  deletedAt?: string | null;
+  sha256?: string;
+  byteLength?: number;
+};
+
+export type Tombstone = {
+  table: "highlights" | "bookmarks" | "voices" | "tags";
+  id: string;
+  deletedAt: string;
+  updatedAt: string;
 };
 
 export type ClubMember = {

@@ -3,13 +3,31 @@ import { assertSameSiteRequest } from "@/lib/auth/isolation.server";
 import { getSessionUser, requireUserId, UnauthorizedError } from "@/lib/auth/verify.server";
 import { BUNDLED_BOOKS } from "./books";
 import { catalogBook, catalogIndex } from "./catalog";
-import { NATIVE_PROTOCOL, POWERSYNC_LOCKED, parseNativePath } from "./native-path";
+import { NATIVE_PROTOCOL, POWERSYNC_LOCKED, SYNC_VERSION, parseNativePath } from "./native-path";
 import { ensureFolioUser, fetchBookBundle } from "./server";
 import { DEFAULT_SETTINGS, type FolioSettings, type Tag } from "./types";
+import {
+  applyPush,
+  completeBlob,
+  createBlob,
+  deleteBookmark,
+  deleteHighlight,
+  deleteTag,
+  deleteVoice,
+  parseOps,
+  putBlobBytes,
+  putBookmark,
+  putHighlight,
+  putProgress,
+  putSettings,
+  putTag,
+  putVoice,
+  readBlob,
+} from "./sync-mutate.server";
 
 const CORS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, PUT, OPTIONS",
   "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Folio-Protocol",
   "Access-Control-Max-Age": "86400",
   "X-Folio-Protocol": NATIVE_PROTOCOL,
@@ -72,7 +90,7 @@ function num(v: unknown, fallback = 0): number {
 }
 
 export async function handleNativeRequest(request: Request): Promise<Response> {
-  if (request.method === "OPTIONS" || request.method === "HEAD") {
+  if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: CORS });
   }
 
@@ -86,10 +104,12 @@ export async function handleNativeRequest(request: Request): Promise<Response> {
         return json({
           ok: true,
           protocol: NATIVE_PROTOCOL,
+          sync: SYNC_VERSION,
+          changeset: SYNC_VERSION,
           powersync: POWERSYNC_LOCKED ? "locked" : "open",
           powersyncLocked: POWERSYNC_LOCKED,
           reason: POWERSYNC_LOCKED
-            ? "HTTP v1 pull/push is the sync until both native apps keep a mark overnight on device."
+            ? "HTTP v1.1 (blobs, tombstones, batch). PowerSync stays locked until both native apps keep a mark overnight."
             : "open",
           catalogSize: BUNDLED_BOOKS.length,
           time: new Date().toISOString(),
@@ -227,8 +247,9 @@ export async function handleNativeRequest(request: Request): Promise<Response> {
         highlights: bundle.highlights,
         bookmarks: bundle.bookmarks,
         tags: bundle.tags,
-        voices: bundle.voices.map((v) => ({ ...v, audioUrl: absUrl(request, v.audioUrl) })),
+        voices: bundle.voices.map((v) => ({ ...v, audioB64: "", audioUrl: absUrl(request, v.audioUrl) })),
         club: bundle.club,
+        tombstones: bundle.tombstones,
       });
     }
 
@@ -245,18 +266,16 @@ export async function handleNativeRequest(request: Request): Promise<Response> {
 
     if (route.name === "settings" && request.method === "POST") {
       const body = await readBody(request);
-      const next: FolioSettings = {
-        ...DEFAULT_SETTINGS,
-        ...(body as Partial<FolioSettings>),
-      };
-      await sql`insert into folio_settings (user_id, json) values (${uid}, ${JSON.stringify(next)})
-        on conflict (user_id) do update set json = excluded.json`;
+      const result = await putSettings(sql, uid, body, DEFAULT_SETTINGS);
+      if (result.rejected?.code === "stale") {
+        return json({ ok: true, stale: true, settings: result.rejected.row, protocol: NATIVE_PROTOCOL });
+      }
       return json({ ok: true, protocol: NATIVE_PROTOCOL });
     }
 
     if (route.name === "tags" && request.method === "GET") {
       const tags = await sql<{ id: string; name: string; emoji: string; kind: Tag["kind"] }>`
-        select id, name, emoji, kind from folio_tags where user_id = ${uid} order by created_at asc`;
+        select id, name, emoji, kind from folio_tags where user_id = ${uid} and deleted_at is null order by created_at asc`;
       return json({
         protocol: NATIVE_PROTOCOL,
         tags: tags.map((t) => ({ id: t.id, name: t.name, emoji: t.emoji, kind: t.kind })),
@@ -266,129 +285,174 @@ export async function handleNativeRequest(request: Request): Promise<Response> {
     if (route.name === "tags" && request.method === "POST") {
       const body = await readBody(request);
       const tid = str(body.id) || newId();
-      const name = str(body.name).slice(0, 40);
-      const emoji = str(body.emoji).slice(0, 8);
-      const kind = str(body.kind, "custom");
-      if (!name) return json({ error: "name_required" }, 400);
-      await sql`insert into folio_tags (id, user_id, name, emoji, kind)
-        values (${tid}, ${uid}, ${name}, ${emoji}, ${kind})
-        on conflict (id) do update set name = excluded.name, emoji = excluded.emoji, kind = excluded.kind
-        where folio_tags.user_id = ${uid}`;
+      const result = await putTag(sql, uid, tid, body);
+      if (result.rejected?.code === "invalid") return json({ error: "name_required" }, 400);
       return json({ id: tid, protocol: NATIVE_PROTOCOL });
     }
 
     if (route.name === "tags" && request.method === "DELETE") {
       const tid = url.searchParams.get("id") || str((await readBody(request)).id);
       if (!tid) return json({ error: "id_required" }, 400);
-      await sql`delete from folio_highlight_tags where tag_id = ${tid}`;
-      await sql`delete from folio_tags where id = ${tid} and user_id = ${uid}`;
+      const result = await deleteTag(sql, uid, tid);
+      if (result.rejected) return json({ ok: false, error: result.rejected.code }, 404);
       return json({ ok: true, protocol: NATIVE_PROTOCOL });
     }
 
     if (route.name === "progress" && request.method === "POST") {
       const body = await readBody(request);
-      const bookId = str(body.bookId);
-      if (!bookId) return json({ error: "bookId_required" }, 400);
-      await sql`insert into folio_progress (user_id, book_id, chapter_index, page_index, percent, locator, updated_at)
-        values (${uid}, ${bookId}, ${num(body.chapterIndex)}, ${num(body.pageIndex)}, ${num(body.percent)}, ${str(body.locator)}, now())
-        on conflict (user_id, book_id) do update set
-          chapter_index = excluded.chapter_index,
-          page_index = excluded.page_index,
-          percent = excluded.percent,
-          locator = excluded.locator,
-          updated_at = now()`;
+      if (!str(body.bookId)) return json({ error: "bookId_required" }, 400);
+      const result = await putProgress(sql, uid, body);
+      if (result.rejected?.code === "stale") {
+        return json({ ok: true, stale: true, progress: result.rejected.row, protocol: NATIVE_PROTOCOL });
+      }
       return json({ ok: true, protocol: NATIVE_PROTOCOL });
     }
 
     if (route.name === "highlights" && request.method === "POST") {
       const body = await readBody(request);
-      const bookId = str(body.bookId);
-      const chapterId = str(body.chapterId);
-      const text = str(body.text).slice(0, 4000);
-      if (!bookId || !chapterId || !text) return json({ error: "highlight_required" }, 400);
+      if (!str(body.bookId) || !str(body.chapterId) || !str(body.text)) {
+        return json({ error: "highlight_required" }, 400);
+      }
       const hid = str(body.id) || newId();
+      const result = await putHighlight(sql, uid, me.displayName, hid, body);
+      if (result.rejected?.code === "companion") return json({ ok: false, error: "forbidden" }, 403);
       const clubs = await sql<{ id: string }>`
         select c.id from folio_clubs c
         join folio_club_members m on m.club_id = c.id
-        where m.user_id = ${uid} and c.book_id = ${bookId}
+        where m.user_id = ${uid} and c.book_id = ${str(body.bookId)}
         limit 1`;
-      const clubId = clubs[0]?.id ?? null;
-      const authorName = str(body.authorName, me.displayName).slice(0, 40);
-      await sql`insert into folio_highlights (id, user_id, book_id, chapter_id, start_offset, end_offset, text, note, author_name, club_id, is_companion)
-        values (${hid}, ${uid}, ${bookId}, ${chapterId}, ${num(body.startOffset)}, ${num(body.endOffset)}, ${text}, ${str(body.note)}, ${authorName}, ${clubId}, ${false})
-        on conflict (id) do update set
-          text = excluded.text,
-          start_offset = excluded.start_offset,
-          end_offset = excluded.end_offset,
-          note = excluded.note
-        where folio_highlights.user_id = ${uid} and coalesce(folio_highlights.is_companion, false) = false`;
-      return json({ id: hid, clubId, protocol: NATIVE_PROTOCOL });
+      return json({ id: hid, clubId: clubs[0]?.id ?? null, protocol: NATIVE_PROTOCOL });
     }
 
     if (route.name === "highlight" && request.method === "PATCH") {
       const body = await readBody(request);
-      const owned = await sql<{ id: string }>`select id from folio_highlights where id = ${route.id} and user_id = ${uid}`;
+      const owned = await sql<{
+        id: string;
+        book_id: string;
+        chapter_id: string;
+        start_offset: number;
+        end_offset: number;
+        text: string;
+        note: string;
+      }>`select id, book_id, chapter_id, start_offset, end_offset, text, note from folio_highlights where id = ${route.id} and user_id = ${uid} and deleted_at is null`;
       if (!owned[0]) return json({ ok: false, error: "not_found" }, 404);
-      if (typeof body.note === "string") {
-        await sql`update folio_highlights set note = ${body.note} where id = ${route.id} and user_id = ${uid}`;
-      }
-      if (Array.isArray(body.tagIds)) {
-        await sql`delete from folio_highlight_tags where highlight_id = ${route.id}`;
-        for (const tagId of body.tagIds) {
-          if (typeof tagId !== "string") continue;
-          await sql`insert into folio_highlight_tags (highlight_id, tag_id) values (${route.id}, ${tagId}) on conflict do nothing`;
-        }
-      }
+      const result = await putHighlight(sql, uid, me.displayName, route.id, {
+        bookId: owned[0].book_id,
+        chapterId: owned[0].chapter_id,
+        startOffset: owned[0].start_offset,
+        endOffset: owned[0].end_offset,
+        text: owned[0].text,
+        note: typeof body.note === "string" ? body.note : owned[0].note,
+        tagIds: Array.isArray(body.tagIds) ? body.tagIds : undefined,
+      });
+      if (result.rejected?.code === "companion") return json({ ok: false, error: "forbidden" }, 403);
       return json({ ok: true, protocol: NATIVE_PROTOCOL });
     }
 
     if (route.name === "highlight" && request.method === "DELETE") {
-      const row = await sql<{ is_companion: boolean | null }>`
-        select is_companion from folio_highlights where id = ${route.id} and user_id = ${uid}`;
-      if (!row[0] || row[0].is_companion) return json({ ok: false, error: "forbidden" }, 403);
-      await sql`delete from folio_voice_notes where highlight_id = ${route.id} and user_id = ${uid}`;
-      await sql`delete from folio_highlight_tags where highlight_id = ${route.id}`;
-      await sql`delete from folio_highlights where id = ${route.id} and user_id = ${uid} and coalesce(is_companion, false) = false`;
+      const result = await deleteHighlight(sql, uid, route.id);
+      if (result.rejected?.code === "companion") return json({ ok: false, error: "forbidden" }, 403);
+      if (result.rejected?.code === "not_found") return json({ ok: false, error: "not_found" }, 404);
       return json({ ok: true, protocol: NATIVE_PROTOCOL });
     }
 
     if (route.name === "bookmarks" && request.method === "POST") {
       const body = await readBody(request);
-      const bookId = str(body.bookId);
-      if (!bookId) return json({ error: "bookId_required" }, 400);
+      if (!str(body.bookId)) return json({ error: "bookId_required" }, 400);
       const bid = str(body.id) || newId();
-      await sql`insert into folio_bookmarks (id, user_id, book_id, chapter_index, page_index, label)
-        values (${bid}, ${uid}, ${bookId}, ${num(body.chapterIndex)}, ${num(body.pageIndex)}, ${str(body.label)})
-        on conflict (id) do update set label = excluded.label
-        where folio_bookmarks.user_id = ${uid}`;
+      await putBookmark(sql, uid, bid, body);
       return json({ id: bid, protocol: NATIVE_PROTOCOL });
     }
 
     if (route.name === "bookmark" && request.method === "DELETE") {
-      await sql`delete from folio_bookmarks where id = ${route.id} and user_id = ${uid}`;
+      const result = await deleteBookmark(sql, uid, route.id);
+      if (result.rejected?.code === "not_found") return json({ ok: false, error: "not_found" }, 404);
       return json({ ok: true, protocol: NATIVE_PROTOCOL });
     }
 
     if (route.name === "voices" && request.method === "POST") {
       const body = await readBody(request);
-      const highlightId = str(body.highlightId);
-      const audioB64 = str(body.audioB64);
-      if (!highlightId) return json({ error: "highlightId_required" }, 400);
-      if (audioB64.length > 2_400_000) return json({ error: "too_long" }, 413);
-      const owned = await sql<{ id: string; club_id: string | null }>`
-        select id, club_id from folio_highlights
-        where id = ${highlightId}
-          and (user_id = ${uid} or club_id in (
-            select club_id from folio_club_members where user_id = ${uid}
-          ))`;
-      if (!owned[0]) return json({ error: "highlight_not_found" }, 404);
+      if (!str(body.highlightId)) return json({ error: "highlightId_required" }, 400);
       const vid = str(body.id) || newId();
-      const authorName = str(body.authorName, me.displayName).slice(0, 40);
-      await sql`insert into folio_voice_notes (id, user_id, highlight_id, transcript, audio_b64, mime, duration_ms, author_name, reply_to, audio_url, is_companion, club_id)
-        values (${vid}, ${uid}, ${highlightId}, ${str(body.transcript).slice(0, 8000)}, ${audioB64}, ${str(body.mime, "audio/m4a")}, ${num(body.durationMs)}, ${authorName}, ${str(body.replyTo) || null}, ${""}, ${false}, ${owned[0].club_id})
-        on conflict (id) do update set transcript = excluded.transcript
-        where folio_voice_notes.user_id = ${uid}`;
+      const result = await putVoice(sql, uid, me.displayName, vid, body);
+      if (result.rejected?.code === "blob_missing") return json({ error: "blob_missing", id: vid, protocol: NATIVE_PROTOCOL }, 409);
+      if (result.rejected?.code === "not_found") return json({ error: "highlight_not_found" }, 404);
+      if (result.rejected?.code === "companion") return json({ error: "forbidden" }, 403);
+      if (result.rejected?.code === "invalid") return json({ error: "too_long" }, 413);
       return json({ id: vid, protocol: NATIVE_PROTOCOL });
+    }
+
+    if (route.name === "voice" && request.method === "DELETE") {
+      const result = await deleteVoice(sql, uid, route.id);
+      if (result.rejected?.code === "companion") return json({ error: "forbidden" }, 403);
+      return json({ ok: true, protocol: NATIVE_PROTOCOL });
+    }
+
+    if (route.name === "push" && request.method === "POST") {
+      const body = await readBody(request);
+      const ops = parseOps(body);
+      if (!ops) return json({ error: "ops_required", protocol: NATIVE_PROTOCOL }, 400);
+      const result = await applyPush(sql, uid, me.displayName, DEFAULT_SETTINGS, ops);
+      return json({ protocol: NATIVE_PROTOCOL, accepted: result.accepted, rejected: result.rejected });
+    }
+
+    if (route.name === "blobs" && request.method === "POST") {
+      const body = await readBody(request);
+      try {
+        const created = await createBlob(sql, uid, {
+          id: str(body.id) || str(body.voiceId) || undefined,
+          mime: str(body.mime) || undefined,
+          byteLength: num(body.byteLength),
+          sha256: str(body.sha256) || undefined,
+        });
+        const origin = new URL(request.url).origin;
+        return json({
+          protocol: NATIVE_PROTOCOL,
+          id: created.id,
+          putUrl: origin + created.putPath,
+          getUrl: origin + created.getPath,
+          expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+        });
+      } catch (err) {
+        const status = typeof err === "object" && err && "status" in err ? Number((err as { status: number }).status) : 400;
+        return json({ error: err instanceof Error ? err.message : "blob", protocol: NATIVE_PROTOCOL }, status);
+      }
+    }
+
+    if (route.name === "blobData" && request.method === "PUT") {
+      const bytes = new Uint8Array(await request.arrayBuffer());
+      const put = await putBlobBytes(sql, uid, route.id, bytes);
+      if (!("ok" in put)) return json({ error: put.error, protocol: NATIVE_PROTOCOL }, put.status);
+      return json({ ok: true, protocol: NATIVE_PROTOCOL, bytes: bytes.byteLength });
+    }
+
+    if (route.name === "blobComplete" && request.method === "POST") {
+      const done = await completeBlob(sql, uid, route.id);
+      if (!("ok" in done)) return json({ error: done.error, protocol: NATIVE_PROTOCOL }, done.status);
+      return json({ ok: true, protocol: NATIVE_PROTOCOL, sha256: done.sha256, byteLength: done.byteLength });
+    }
+
+    if (route.name === "blob" && (request.method === "GET" || request.method === "HEAD")) {
+      const blob = await readBlob(sql, uid, route.id);
+      if (!blob) return json({ error: "not_found", protocol: NATIVE_PROTOCOL }, 404);
+      if (request.method === "HEAD") {
+        return new Response(null, {
+          status: 200,
+          headers: {
+            ...CORS,
+            "Content-Type": blob.mime,
+            "Content-Length": String(blob.bytes.byteLength),
+          },
+        });
+      }
+      return new Response(Buffer.from(blob.bytes), {
+        status: 200,
+        headers: {
+          ...CORS,
+          "Content-Type": blob.mime,
+          "Cache-Control": "private, max-age=3600",
+        },
+      });
     }
 
     return json({ error: "method_not_allowed", protocol: NATIVE_PROTOCOL }, 405);

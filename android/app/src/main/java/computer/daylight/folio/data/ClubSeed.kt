@@ -48,4 +48,8 @@ object ClubSeed {
             9890,
         ),
     )
+    fun companionKey(id: String): String? {
+        val m = Regex("""^(theo-(?:hl|v)-[a-z]+)(?:-[0-9a-f]{8})?$""", RegexOption.IGNORE_CASE).matchEntire(id.trim())
+        return m?.groupValues?.get(1)?.lowercase()
+    }
 }

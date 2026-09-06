@@ -24,8 +24,22 @@ import {
   type LibraryItem,
   type Progress,
   type Tag,
+  type Tombstone,
   type VoiceNote,
 } from "./types";
+import { stamp } from "./sync-clock";
+import {
+  deleteBookmark as mutDeleteBookmark,
+  deleteHighlight as mutDeleteHighlight,
+  deleteTag as mutDeleteTag,
+  ingestB64Blob,
+  putBookmark as mutPutBookmark,
+  putHighlight as mutPutHighlight,
+  putProgress as mutPutProgress,
+  putSettings as mutPutSettings,
+  putTag as mutPutTag,
+  putVoice as mutPutVoice,
+} from "./sync-mutate.server";
 
 function id() {
   return crypto.randomUUID();
@@ -259,6 +273,7 @@ export async function fetchBookBundle(uid: string, bookId: string) {
         tags: [] as Tag[],
         voices: [] as VoiceNote[],
         club: null as Club | null,
+        tombstones: [] as Tombstone[],
       };
 
     const clubRows = await sql<{
@@ -299,6 +314,7 @@ export async function fetchBookBundle(uid: string, bookId: string) {
              coalesce(author_name, '') as author_name, club_id, coalesce(is_companion, false) as is_companion
       from folio_highlights
       where book_id = ${bookId}
+        and deleted_at is null
         and (user_id = ${uid} or club_id in (
           select c.id from folio_clubs c
           join folio_club_members m on m.club_id = c.id
@@ -323,9 +339,9 @@ export async function fetchBookBundle(uid: string, bookId: string) {
       page_index: number;
       label: string;
       created_at: string;
-    }>`select id, book_id, chapter_index, page_index, label, created_at from folio_bookmarks where user_id = ${uid} and book_id = ${bookId} order by created_at desc`;
+    }>`select id, book_id, chapter_index, page_index, label, created_at from folio_bookmarks where user_id = ${uid} and book_id = ${bookId} and deleted_at is null order by created_at desc`;
     const tags = await sql<{ id: string; name: string; emoji: string; kind: Tag["kind"] }>`
-      select id, name, emoji, kind from folio_tags where user_id = ${uid} order by created_at asc`;
+      select id, name, emoji, kind from folio_tags where user_id = ${uid} and deleted_at is null order by created_at asc`;
     const voices = await sql<{
       id: string;
       user_id: string;
@@ -346,11 +362,53 @@ export async function fetchBookBundle(uid: string, bookId: string) {
        from folio_voice_notes v
        join folio_highlights h on h.id = v.highlight_id
        where h.book_id = ${bookId}
+         and v.deleted_at is null
+         and h.deleted_at is null
          and (v.user_id = ${uid} or v.club_id in (
            select c.id from folio_clubs c
            join folio_club_members m on m.club_id = c.id
            where m.user_id = ${uid} and c.book_id = ${bookId}
          ))`;
+    const tombHl = await sql<{ id: string; deleted_at: string; updated_at: string }>`
+      select id, deleted_at, updated_at from folio_highlights
+      where book_id = ${bookId} and deleted_at is not null
+        and (user_id = ${uid} or club_id in (
+          select c.id from folio_clubs c
+          join folio_club_members m on m.club_id = c.id
+          where m.user_id = ${uid} and c.book_id = ${bookId}
+        ))`;
+    const tombBm = await sql<{ id: string; deleted_at: string; updated_at: string }>`
+      select id, deleted_at, updated_at from folio_bookmarks
+      where user_id = ${uid} and book_id = ${bookId} and deleted_at is not null`;
+    const tombVo = await sql<{ id: string; deleted_at: string; updated_at: string }>`
+      select v.id, v.deleted_at, v.updated_at from folio_voice_notes v
+      join folio_highlights h on h.id = v.highlight_id
+      where h.book_id = ${bookId} and v.deleted_at is not null
+        and (v.user_id = ${uid} or v.club_id in (
+          select c.id from folio_clubs c
+          join folio_club_members m on m.club_id = c.id
+          where m.user_id = ${uid} and c.book_id = ${bookId}
+        ))`;
+    const tombstones: Tombstone[] = [
+      ...tombHl.map((r) => ({
+        table: "highlights" as const,
+        id: r.id,
+        deletedAt: stamp(r.deleted_at),
+        updatedAt: stamp(r.updated_at),
+      })),
+      ...tombBm.map((r) => ({
+        table: "bookmarks" as const,
+        id: r.id,
+        deletedAt: stamp(r.deleted_at),
+        updatedAt: stamp(r.updated_at),
+      })),
+      ...tombVo.map((r) => ({
+        table: "voices" as const,
+        id: r.id,
+        deletedAt: stamp(r.deleted_at),
+        updatedAt: stamp(r.updated_at),
+      })),
+    ];
     return {
       book,
       highlights: hl.map((h) => mapHighlight(h, tagMap.get(h.id) ?? [])),
@@ -370,7 +428,7 @@ export async function fetchBookBundle(uid: string, bookId: string) {
           id: v.id,
           highlightId: v.highlight_id,
           transcript: v.transcript,
-          audioB64: v.audio_b64,
+          audioB64: "",
           audioUrl: v.audio_url ?? "",
           mime: v.mime,
           durationMs: Number(v.duration_ms),
@@ -383,6 +441,7 @@ export async function fetchBookBundle(uid: string, bookId: string) {
         }),
       ),
       club,
+      tombstones,
     };
 }
 
@@ -396,14 +455,7 @@ export const saveProgress = createServerFn({ method: "POST" })
   .validator((p: Progress) => p)
   .handler(async ({ context, data: p }) => {
     const sql = await getSql();
-    await sql`insert into folio_progress (user_id, book_id, chapter_index, page_index, percent, locator, updated_at)
-      values (${context.userId}, ${p.bookId}, ${p.chapterIndex}, ${p.pageIndex}, ${p.percent}, ${p.locator}, now())
-      on conflict (user_id, book_id) do update set
-        chapter_index = excluded.chapter_index,
-        page_index = excluded.page_index,
-        percent = excluded.percent,
-        locator = excluded.locator,
-        updated_at = now()`;
+    await mutPutProgress(sql, context.userId, p as unknown as Record<string, unknown>);
     return { ok: true as const };
   });
 
@@ -412,8 +464,7 @@ export const saveSettings = createServerFn({ method: "POST" })
   .validator((s: FolioSettings) => s)
   .handler(async ({ context, data: s }) => {
     const sql = await getSql();
-    await sql`insert into folio_settings (user_id, json) values (${context.userId}, ${JSON.stringify(s)})
-      on conflict (user_id) do update set json = excluded.json`;
+    await mutPutSettings(sql, context.userId, s as unknown as Record<string, unknown>, DEFAULT_SETTINGS);
     return { ok: true as const };
   });
 
@@ -432,16 +483,17 @@ export const addHighlight = createServerFn({ method: "POST" })
   .handler(async ({ context, data: h }) => {
     const sql = await getSql();
     const hid = id();
+    const result = await mutPutHighlight(sql, context.userId, h.authorName || "You", hid, {
+      ...h,
+      id: hid,
+    });
+    if (result.rejected) return { id: hid, clubId: null };
     const clubs = await sql<{ id: string }>`
       select c.id from folio_clubs c
       join folio_club_members m on m.club_id = c.id
       where m.user_id = ${context.userId} and c.book_id = ${h.bookId}
       limit 1`;
-    const clubId = clubs[0]?.id ?? null;
-    const authorName = (h.authorName || "You").slice(0, 40);
-    await sql`insert into folio_highlights (id, user_id, book_id, chapter_id, start_offset, end_offset, text, author_name, club_id, is_companion)
-      values (${hid}, ${context.userId}, ${h.bookId}, ${h.chapterId}, ${h.startOffset}, ${h.endOffset}, ${h.text.slice(0, 4000)}, ${authorName}, ${clubId}, ${false})`;
-    return { id: hid, clubId };
+    return { id: hid, clubId: clubs[0]?.id ?? null };
   });
 
 export const updateHighlight = createServerFn({ method: "POST" })
@@ -468,13 +520,8 @@ export const deleteHighlight = createServerFn({ method: "POST" })
   .validator((hid: string) => hid)
   .handler(async ({ context, data: hid }) => {
     const sql = await getSql();
-    const row = await sql<{ is_companion: boolean | null }>`
-      select is_companion from folio_highlights where id = ${hid} and user_id = ${context.userId}`;
-    if (!row[0] || row[0].is_companion) return { ok: false as const };
-    await sql`delete from folio_voice_notes where highlight_id = ${hid} and user_id = ${context.userId}`;
-    await sql`delete from folio_highlight_tags where highlight_id = ${hid}`;
-    await sql`delete from folio_highlights where id = ${hid} and user_id = ${context.userId} and coalesce(is_companion, false) = false`;
-    return { ok: true as const };
+    const result = await mutDeleteHighlight(sql, context.userId, hid);
+    return { ok: !result.rejected as true | false };
   });
 
 export const addBookmark = createServerFn({ method: "POST" })
@@ -483,8 +530,7 @@ export const addBookmark = createServerFn({ method: "POST" })
   .handler(async ({ context, data: b }) => {
     const sql = await getSql();
     const bid = id();
-    await sql`insert into folio_bookmarks (id, user_id, book_id, chapter_index, page_index, label)
-      values (${bid}, ${context.userId}, ${b.bookId}, ${b.chapterIndex}, ${b.pageIndex}, ${b.label})`;
+    await mutPutBookmark(sql, context.userId, bid, b as unknown as Record<string, unknown>);
     return { id: bid };
   });
 
@@ -493,7 +539,7 @@ export const deleteBookmark = createServerFn({ method: "POST" })
   .validator((bid: string) => bid)
   .handler(async ({ context, data: bid }) => {
     const sql = await getSql();
-    await sql`delete from folio_bookmarks where id = ${bid} and user_id = ${context.userId}`;
+    await mutDeleteBookmark(sql, context.userId, bid);
     return { ok: true as const };
   });
 
@@ -503,7 +549,7 @@ export const addTag = createServerFn({ method: "POST" })
   .handler(async ({ context, data: t }) => {
     const sql = await getSql();
     const tid = id();
-    await sql`insert into folio_tags (id, user_id, name, emoji, kind) values (${tid}, ${context.userId}, ${t.name.slice(0, 40)}, ${t.emoji.slice(0, 8)}, ${t.kind})`;
+    await mutPutTag(sql, context.userId, tid, t as unknown as Record<string, unknown>);
     return { id: tid };
   });
 
@@ -512,8 +558,7 @@ export const deleteTag = createServerFn({ method: "POST" })
   .validator((tid: string) => tid)
   .handler(async ({ context, data: tid }) => {
     const sql = await getSql();
-    await sql`delete from folio_highlight_tags where tag_id = ${tid}`;
-    await sql`delete from folio_tags where id = ${tid} and user_id = ${context.userId}`;
+    await mutDeleteTag(sql, context.userId, tid);
     return { ok: true as const };
   });
 
@@ -531,19 +576,22 @@ export const saveVoiceNote = createServerFn({ method: "POST" })
     }) => v,
   )
   .handler(async ({ context, data: v }) => {
-    if (v.audioB64.length > 2_400_000) throw new Error("Voice note is too long");
     const sql = await getSql();
-    const owned = await sql<{ id: string; club_id: string | null }>`
-      select id, club_id from folio_highlights
-      where id = ${v.highlightId}
-        and (user_id = ${context.userId} or club_id in (
-          select club_id from folio_club_members where user_id = ${context.userId}
-        ))`;
-    if (!owned[0]) throw new Error("Highlight not found");
     const vid = id();
-    const authorName = (v.authorName || "You").slice(0, 40);
-    await sql`insert into folio_voice_notes (id, user_id, highlight_id, transcript, audio_b64, mime, duration_ms, author_name, reply_to, audio_url, is_companion, club_id)
-      values (${vid}, ${context.userId}, ${v.highlightId}, ${v.transcript.slice(0, 8000)}, ${v.audioB64}, ${v.mime}, ${v.durationMs}, ${authorName}, ${v.replyTo ?? null}, ${""}, ${false}, ${owned[0].club_id})`;
+    if (v.audioB64) {
+      const ingested = await ingestB64Blob(sql, context.userId, vid, v.audioB64, v.mime);
+      if ("error" in ingested) throw new Error(ingested.error === "too_long" ? "Voice note is too long" : ingested.error);
+    }
+    const result = await mutPutVoice(sql, context.userId, v.authorName || "You", vid, {
+      highlightId: v.highlightId,
+      transcript: v.transcript,
+      mime: v.mime,
+      durationMs: v.durationMs,
+      replyTo: v.replyTo ?? null,
+    });
+    if (result.rejected?.code === "not_found") throw new Error("Highlight not found");
+    if (result.rejected?.code === "invalid") throw new Error("Voice note is too long");
+    if (result.rejected) throw new Error(result.rejected.code);
     return { id: vid };
   });
 
@@ -577,7 +625,7 @@ export const loadAllMarks = createServerFn({ method: "GET" })
     const hl = await sql<HighlightRow>`
       select id, user_id, book_id, chapter_id, start_offset, end_offset, text, note, created_at,
              coalesce(author_name, '') as author_name, club_id, coalesce(is_companion, false) as is_companion
-      from folio_highlights where user_id = ${uid} order by created_at desc limit 400`;
+      from folio_highlights where user_id = ${uid} and deleted_at is null order by created_at desc limit 400`;
     const tagMap = new Map<string, string[]>();
     const allLinks = await sql<{ highlight_id: string; tag_id: string }>`
       select ht.highlight_id, ht.tag_id
@@ -590,7 +638,7 @@ export const loadAllMarks = createServerFn({ method: "GET" })
       tagMap.set(l.highlight_id, arr);
     }
     const tags = await sql<{ id: string; name: string; emoji: string; kind: Tag["kind"] }>`
-      select id, name, emoji, kind from folio_tags where user_id = ${uid} order by created_at asc`;
+      select id, name, emoji, kind from folio_tags where user_id = ${uid} and deleted_at is null order by created_at asc`;
     const voices = await sql<{ highlight_id: string; n: number }>`
       select highlight_id, count(*)::int as n from folio_voice_notes where user_id = ${uid} group by highlight_id`;
     const voiceSet = new Set(voices.map((v) => v.highlight_id));

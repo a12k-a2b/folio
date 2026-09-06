@@ -18,7 +18,7 @@ Sister projects: [Gloss](https://github.com/a12k-a2b/gloss) (teacher’s margin)
 - **EPUB and HTML** upload
 - **Page curl**, Instapaper / Matter-like type on paper
 - **Thumb layout** for a 10.5″ portrait folio: page-turn and mic sit in the bottom corners
-- **Sync** — sign in once; marks, voice, tags, and the page you were on travel from the garden folio to the phone
+- **Sync** — HTTP v1.1: voice as a blob, deletes as tombstones, a batch that cannot stall. Sign in; marks, voice, tags, and the page you were on travel from the garden folio to the phone. PowerSync stays locked until both native apps keep a mark overnight.
 
 Native sketches (Kotlin / Compose for DC-1, SwiftUI for iPhone) live under `android/`, `ios/`, and `native/`.
 

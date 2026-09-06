@@ -49,4 +49,13 @@ enum ClubSeed {
             durationMs: 9890
         ),
     ]
+
+    static func companionKey(_ id: String) -> String? {
+        let pattern = #"^(theo-(?:hl|v)-[a-z]+)(?:-[0-9a-f]{8})?$"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+        let range = NSRange(id.startIndex..<id.endIndex, in: id)
+        guard let match = regex.firstMatch(in: id, options: [], range: range), match.numberOfRanges >= 2,
+              let r = Range(match.range(at: 1), in: id) else { return nil }
+        return String(id[r]).lowercased()
+    }
 }

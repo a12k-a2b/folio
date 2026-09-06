@@ -4,6 +4,9 @@ import android.content.Context
 import computer.daylight.folio.net.FolioApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import android.util.Base64
+import org.json.JSONArray
+import org.json.JSONObject
 import java.util.UUID
 
 class FolioRepository(private val context: Context) {
@@ -106,20 +109,149 @@ class FolioRepository(private val context: Context) {
             val snap = api.snapshot(bookId)
             if (snap != null) {
                 val remote = api.mergeSnapshotHighlights(snap)
+                remapTheo(snap)
+                val tombs = api.tombstones(snap)
+                for (i in 0 until tombs.length()) {
+                    val t = tombs.getJSONObject(i)
+                    val table = when (t.optString("table")) {
+                        "highlights" -> "folio_highlights"
+                        "bookmarks" -> "folio_bookmarks"
+                        "voices" -> "folio_voice_notes"
+                        else -> continue
+                    }
+                    db.applyTombstone(table, t.getString("id"), t.optString("updatedAt").ifBlank { t.optString("deletedAt") })
+                }
                 val local = db.highlights(bookId)
                 val localIds = local.map { it.id }.toSet()
                 remote.forEach { h ->
                     if (h.id !in localIds) db.insertHighlight(h.copy(dirty = false))
                 }
             }
-            db.dirtyHighlights().filter { it.bookId == bookId }.forEach { h ->
-                api.pushHighlight(h)
-                db.markClean("folio_highlights", h.id)
+            val ops = JSONArray()
+            db.dirtyDeletes("folio_highlights").forEach { id ->
+                ops.put(JSONObject().put("op", "delete").put("table", "highlights").put("id", id).put("updatedAt", nowIso()))
             }
-            db.progress(bookId)?.let { api.pushProgress(it) }
+            db.dirtyDeletes("folio_bookmarks").forEach { id ->
+                ops.put(JSONObject().put("op", "delete").put("table", "bookmarks").put("id", id).put("updatedAt", nowIso()))
+            }
+            db.bookmarks(bookId).filter { it.dirty }.forEach { b ->
+                ops.put(
+                    JSONObject()
+                        .put("op", "put")
+                        .put("table", "bookmarks")
+                        .put("id", b.id)
+                        .put("updatedAt", b.createdAt)
+                        .put(
+                            "row",
+                            JSONObject()
+                                .put("bookId", b.bookId)
+                                .put("chapterIndex", b.chapterIndex)
+                                .put("pageIndex", b.pageIndex)
+                                .put("label", b.label),
+                        ),
+                )
+            }
+            db.dirtyHighlights().filter { it.bookId == bookId }.forEach { h ->
+                ops.put(
+                    JSONObject()
+                        .put("op", "put")
+                        .put("table", "highlights")
+                        .put("id", h.id)
+                        .put("updatedAt", h.createdAt)
+                        .put(
+                            "row",
+                            JSONObject()
+                                .put("bookId", h.bookId)
+                                .put("chapterId", h.chapterId)
+                                .put("startOffset", h.startOffset)
+                                .put("endOffset", h.endOffset)
+                                .put("text", h.text)
+                                .put("note", h.note)
+                                .put("authorName", h.authorName),
+                        ),
+                )
+            }
+            db.voices(bookId).filter { it.dirty && !it.isCompanion }.forEach { v ->
+                if (v.audioB64.isNotBlank()) {
+                    try {
+                        val raw = Base64.decode(v.audioB64, Base64.DEFAULT)
+                        api.createBlob(v.id, v.mime, raw.size)
+                        api.putBlob(v.id, raw)
+                        api.completeBlob(v.id)
+                    } catch (_: Exception) {
+                    }
+                }
+                ops.put(
+                    JSONObject()
+                        .put("op", "put")
+                        .put("table", "voices")
+                        .put("id", v.id)
+                        .put("row", JSONObject()
+                            .put("highlightId", v.highlightId)
+                            .put("transcript", v.transcript)
+                            .put("mime", v.mime)
+                            .put("durationMs", v.durationMs)
+                            .put("authorName", v.authorName)),
+                )
+            }
+            db.progress(bookId)?.let { p ->
+                ops.put(
+                    JSONObject()
+                        .put("op", "put")
+                        .put("table", "progress")
+                        .put("id", p.bookId)
+                        .put("updatedAt", p.updatedAt)
+                        .put(
+                            "row",
+                            JSONObject()
+                                .put("bookId", p.bookId)
+                                .put("chapterIndex", p.chapterIndex)
+                                .put("pageIndex", p.pageIndex)
+                                .put("percent", p.percent)
+                                .put("locator", p.locator)
+                                .put("updatedAt", p.updatedAt),
+                        ),
+                )
+            }
+            if (ops.length() > 0) {
+                val res = api.push(ops)
+                val accepted = res.optJSONArray("accepted") ?: JSONArray()
+                for (i in 0 until accepted.length()) {
+                    val a = accepted.getJSONObject(i)
+                    val table = when (a.optString("table")) {
+                        "highlights" -> "folio_highlights"
+                        "bookmarks" -> "folio_bookmarks"
+                        "voices" -> "folio_voice_notes"
+                        else -> continue
+                    }
+                    db.markClean(table, a.optString("id"))
+                }
+            }
             "pulled · pushed dirty marks"
         } catch (e: Exception) {
             "sync failed: ${e.message}"
+        }
+    }
+
+    private fun remapTheo(snap: JSONObject) {
+        val remote = api().mergeSnapshotHighlights(snap)
+        val remoteIds = remote.map { it.id }
+        db.highlights(ClubSeed.ALEXANDER_BOOK).filter { it.isCompanion }.forEach { local ->
+            val key = ClubSeed.companionKey(local.id) ?: return@forEach
+            val hit = remoteIds.find { ClubSeed.companionKey(it) == key } ?: return@forEach
+            if (hit != local.id) {
+                db.remapRow("folio_highlights", local.id, hit)
+                db.remapVoiceParent(local.id, hit)
+            }
+        }
+        val voices = snap.optJSONArray("voices") ?: JSONArray()
+        val remoteVoiceIds = buildList {
+            for (i in 0 until voices.length()) add(voices.getJSONObject(i).optString("id"))
+        }
+        db.companionVoices().forEach { (localId, _) ->
+            val key = ClubSeed.companionKey(localId) ?: return@forEach
+            val hit = remoteVoiceIds.find { ClubSeed.companionKey(it) == key } ?: return@forEach
+            if (hit.isNotBlank() && hit != localId) db.remapRow("folio_voice_notes", localId, hit)
         }
     }
 }
