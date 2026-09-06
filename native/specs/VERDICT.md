@@ -80,3 +80,6 @@ Until then: no PowerSync SDK, no change_log, no blob pipeline in production. Loc
 ## One-line
 
 PowerSync is a good engine for a different app. Changeset v2 is that engine, worse. Folio needs blobs, tombstones, and a batch that cannot stall — then stop.
+
+Replicache / Zero / Instant are not a shortcut. They are web (or RN) engines; Zero **rejects writes when offline**. See [C-off-the-shelf.md](./C-off-the-shelf.md).
+

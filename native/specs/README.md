@@ -4,7 +4,7 @@ Folio already syncs. HTTP v1 (`folio-native/1`) is the live contract: snapshot p
 
 The question is **what to unlock into**, not whether to skip the gate.
 
-**Verdict:** you do not need PowerSync. You also should not ship Changeset v2 as written. After the gate, close three holes in v1 (blobs, tombstones, batch). Full write-up: [VERDICT.md](./VERDICT.md).
+**Verdict:** you do not need PowerSync. You also should not ship Changeset v2 as written. After the gate, close three holes in v1 (blobs, tombstones, batch). Full write-up: [VERDICT.md](./VERDICT.md). Off-the-shelf (Replicache, Zero, Instant, Turso): [C-off-the-shelf.md](./C-off-the-shelf.md) — none of them hit Kotlin + Swift + days-offline writes except PowerSync, which we already rejected.
 
 | | A · PowerSync | B · Folio Changeset | v1.1 (recommended) |
 | --- | --- | --- | --- |
