@@ -10,7 +10,7 @@ Sister projects: [Gloss](https://github.com/a12k-a2b/gloss) (teacher’s margin)
 
 - **Matter-style marks** — two taps a word, three a sentence, four a paragraph; hold and drag for a span
 - **Kindle-style** highlights, written notes, page bookmarks
-- **Tags as you read** — Person, Place, Idea, Quote, Book, plus your own; auto-tag from the sentence
+- **Tags as you read** — Person, Place, Idea, Quote, Book, plus your own; auto-tag from the sentence. Tags are programmable highlighters: Book finds the cited work, Quote fact-checks the claim, Question sends your note with the page around it.
 - **Alexander Circle** — Theo left voices on *Living Structure*. Tap a marked line, hear him, hold the mic and answer
 - **Gloss plugin** — tap a word for a teacher’s note in the margin; *I know this* lifts the underline
 - **Peek plugin** — hold a link, a sheet of the article slides in from the right; lift to go back, drag left to keep it
@@ -40,6 +40,7 @@ npm run build
 
 - Open **Alexander Circle** → *Living Structure*. Tap a marked sentence. Hear Theo. Hold the microphone to reply.
 - Two taps / three taps / four taps / hold-drag on a sentence. Tags apply as you mark.
+- In *How to read a place*, mark **Timeless Way** and tap **Book** — it finds the work. Mark a claim and tap **Quote** for a skeptical check. Write “Is there more recent work?” and tap **Question**.
 - Settings → **Gloss**. Dotted words get a teacher’s note.
 - In *How to read a place*, hold **his name**, **Timeless Way**, or **courtyard**. Peek. Lift. Drag left to keep.
 - Search Gutenberg on the shelf, or upload an EPUB / HTML file.

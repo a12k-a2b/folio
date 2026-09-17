@@ -6,6 +6,7 @@ export function applyMarks(
   highlights: Highlight[],
   activeId?: string | null,
   voicedIds?: Set<string>,
+  brushOf?: Map<string, string>,
 ) {
   unwrapMarks(root);
   const sorted = [...highlights].sort((a, b) => a.startOffset - b.startOffset);
@@ -19,13 +20,14 @@ export function applyMarks(
       activeId === h.id,
       Boolean(voicedIds?.has(h.id)),
       h.isCompanion,
+      brushOf?.get(h.id),
     );
   }
 }
 
 export function applyDraft(root: HTMLElement, start: number, end: number) {
   if (end <= start) return;
-  wrapRange(root, start, end, "draft", false, false, false, false);
+  wrapRange(root, start, end, "draft", false, false, false, false, undefined);
   root.querySelectorAll('mark[data-highlight-id="draft"]').forEach((m) => {
     m.classList.add("folio-draft");
   });
@@ -51,6 +53,7 @@ function wrapRange(
   active: boolean,
   hasVoice: boolean,
   isTheirs: boolean,
+  brush?: string,
 ) {
   if (endOffset <= startOffset) return;
   const start = offsetToPoint(root, startOffset);
@@ -91,6 +94,7 @@ function wrapRange(
       (active ? " is-active" : "") +
       (isTheirs ? " is-theirs" : "");
     mark.dataset.highlightId = id;
+    if (brush) mark.dataset.brush = brush;
     target.parentNode?.insertBefore(mark, target);
     mark.appendChild(target);
   }

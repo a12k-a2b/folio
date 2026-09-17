@@ -1,9 +1,91 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { cn } from "@/lib/cn";
-import { apiAddTag, transcribeAudio } from "@/lib/folio/api";
-import type { Highlight, Tag, VoiceNote } from "@/lib/folio/types";
+import { apiAddTag, apiImportGutenberg, searchGutenberg, transcribeAudio } from "@/lib/folio/api";
+import { BRUSHES, type PrintSlip } from "@/lib/folio/brushes";
+import type { Highlight, Tag, TagKind, VoiceNote } from "@/lib/folio/types";
 import { VoiceBubble, VoicePad } from "./voice-pad";
+
+function PrintCard({
+  slip,
+  busy,
+  onAgain,
+}: {
+  slip: PrintSlip;
+  busy: boolean;
+  onAgain: () => void;
+}) {
+  const [shelf, setShelf] = useState<{ id: number; title: string; authors: string; epubUrl: string | null } | null>(null);
+  const [shelving, setShelving] = useState(false);
+
+  useEffect(() => {
+    if (slip.kind !== "book" || !slip.title) return;
+    let alive = true;
+    void searchGutenberg({ data: slip.title.split(/[:—–]/)[0]?.trim() ?? slip.title }).then((hits) => {
+      if (!alive) return;
+      const hit = hits.find((h) => h.epubUrl) ?? hits[0];
+      if (hit) setShelf({ id: hit.id, title: hit.title, authors: hit.authors, epubUrl: hit.epubUrl });
+    });
+    return () => {
+      alive = false;
+    };
+  }, [slip.kind, slip.title]);
+
+  return (
+    <article className="mt-4 border border-rule bg-paper-2 px-3 py-3">
+      <div className="font-ui text-[10px] tracking-[0.16em] text-ink-soft uppercase">{slip.kicker}</div>
+      <h3 className="mt-1 font-serif text-[18px] leading-snug">{slip.title}</h3>
+      <div className="mt-2 space-y-2 font-serif text-[15px] leading-relaxed text-ink">
+        {slip.body.split(/\n\n+/).map((p, i) => (
+          <p key={i}>{p}</p>
+        ))}
+      </div>
+      {slip.sources.length > 0 && (
+        <ul className="mt-3 space-y-1">
+          {slip.sources.map((s) => (
+            <li key={s.url || s.title} className="font-ui text-[11px] text-ink-soft">
+              {s.url ? (
+                <a href={s.url} target="_blank" rel="noreferrer" className="underline decoration-rule underline-offset-2">
+                  {s.title || s.url}
+                </a>
+              ) : (
+                s.title
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          disabled={busy}
+          onClick={onAgain}
+          className="font-ui text-[11px] tracking-[0.14em] text-ink-soft uppercase"
+        >
+          {busy ? "Printing…" : "Print again"}
+        </button>
+        {shelf?.epubUrl && (
+          <button
+            type="button"
+            disabled={shelving}
+            onClick={() => {
+              setShelving(true);
+              void apiImportGutenberg({
+                id: shelf.id,
+                title: shelf.title,
+                authors: shelf.authors,
+                epubUrl: shelf.epubUrl!,
+              }).finally(() => setShelving(false));
+            }}
+            className="font-ui text-[11px] tracking-[0.14em] uppercase"
+          >
+            {shelving ? "Shelving…" : `Shelve · ${shelf.title}`}
+          </button>
+        )}
+      </div>
+    </article>
+  );
+}
 
 export function VoiceThread({
   highlight,
@@ -11,6 +93,8 @@ export function VoiceThread({
   userId,
   tags,
   suggested,
+  prints,
+  printBusy,
   onNote,
   onTags,
   onVoice,
@@ -18,12 +102,15 @@ export function VoiceThread({
   canDelete,
   autoPlayId,
   onTagsCreated,
+  onPrint,
 }: {
   highlight: Highlight;
   voices: VoiceNote[];
   userId: string;
   tags: Tag[];
   suggested: string[];
+  prints: PrintSlip[];
+  printBusy: string | null;
   onNote: (note: string) => void;
   onTags: (tagIds: string[]) => void;
   onVoice: (v: { audioB64: string; mime: string; durationMs: number; transcript: string }) => Promise<void>;
@@ -31,14 +118,18 @@ export function VoiceThread({
   canDelete: boolean;
   autoPlayId?: string | null;
   onTagsCreated?: () => void;
+  onPrint: (kind: TagKind, force?: boolean, note?: string) => void;
 }) {
   const [note, setNote] = useState(highlight.note);
   const [busy, setBusy] = useState(false);
-  const [more, setMore] = useState(highlight.tagIds.length > 0 || Boolean(highlight.note));
+  const [more, setMore] = useState(highlight.tagIds.length > 0 || Boolean(highlight.note) || prints.length > 0);
   const [newTag, setNewTag] = useState("");
+  const [askOpen, setAskOpen] = useState(false);
+  const noteRef = useRef<HTMLTextAreaElement>(null);
   const mine = voices
     .filter((v) => v.highlightId === highlight.id)
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const minePrints = prints.filter((p) => p.highlightId === highlight.id);
 
   useEffect(() => {
     setNote(highlight.note);
@@ -51,6 +142,29 @@ export function VoiceThread({
     setNewTag("");
     onTags([...highlight.tagIds, res.id]);
     onTagsCreated?.();
+    onPrint("custom");
+  }
+
+  function toggleTag(tag: Tag) {
+    const on = highlight.tagIds.includes(tag.id);
+    const next = on ? highlight.tagIds.filter((id) => id !== tag.id) : [...highlight.tagIds, tag.id];
+    onTags(next);
+    if (on) return;
+    if (tag.kind === "question" && !highlight.note.trim() && !note.trim()) {
+      setMore(true);
+      setAskOpen(true);
+      window.setTimeout(() => noteRef.current?.focus(), 40);
+      return;
+    }
+    onPrint(tag.kind);
+  }
+
+  function sendAsk() {
+    if (note !== highlight.note) onNote(note);
+    const q = tags.find((t) => t.kind === "question");
+    if (q && !highlight.tagIds.includes(q.id)) onTags([...highlight.tagIds, q.id]);
+    setAskOpen(false);
+    onPrint("question", false, note);
   }
 
   return (
@@ -70,6 +184,59 @@ export function VoiceThread({
             ))}
         </div>
       )}
+      <p className="mt-4 font-ui text-[11px] tracking-[0.16em] text-ink-soft uppercase">Brushes</p>
+      <p className="mt-1 font-serif text-[14px] leading-snug text-ink-soft">
+        Book finds the work. Quote checks the claim. Question sends your note with the page around it.
+      </p>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {tags.map((t) => {
+          const on = highlight.tagIds.includes(t.id);
+          const spec = BRUSHES[t.kind];
+          const thisBusy = printBusy === `${highlight.id}:${t.kind}`;
+          return (
+            <button
+              key={t.id}
+              type="button"
+              disabled={thisBusy}
+              onClick={() => toggleTag(t)}
+              className={cn(
+                "border px-2.5 py-1.5 font-ui text-[13px]",
+                on ? "border-ink bg-paper-2" : "border-rule text-ink-soft",
+              )}
+            >
+              {t.name}
+              <span className="ml-1.5 text-[11px] tracking-wide uppercase opacity-60">{thisBusy ? "…" : spec.verb}</span>
+            </button>
+          );
+        })}
+      </div>
+      {askOpen && (
+        <div className="mt-3">
+          <textarea
+            ref={noteRef}
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="Is there more recent work?"
+            rows={3}
+            className="w-full resize-none border border-rule bg-paper-2 p-3 font-serif text-[15px] leading-relaxed outline-none"
+          />
+          <button
+            type="button"
+            onClick={sendAsk}
+            className="mt-2 border border-ink bg-ink px-3 py-2 font-ui text-[11px] tracking-wide text-paper uppercase"
+          >
+            Send with the page around it
+          </button>
+        </div>
+      )}
+      {minePrints.map((slip) => (
+        <PrintCard
+          key={slip.id}
+          slip={slip}
+          busy={printBusy === `${highlight.id}:${slip.kind}`}
+          onAgain={() => onPrint(slip.kind, true)}
+        />
+      ))}
       <div className="mt-4 space-y-3">
         {mine.map((v) => (
           <VoiceBubble
@@ -113,15 +280,25 @@ export function VoiceThread({
       {more && (
         <div className="mt-3">
           <textarea
+            ref={noteRef}
             value={note}
             onChange={(e) => setNote(e.target.value)}
             onBlur={() => {
               if (note !== highlight.note) onNote(note);
             }}
-            placeholder="A note, if the sentence needs one"
+            placeholder="A note, if the sentence needs one — or a question to send"
             rows={3}
             className="w-full resize-none border border-rule bg-paper-2 p-3 font-serif text-[15px] leading-relaxed outline-none"
           />
+          {note.trim() && (
+            <button
+              type="button"
+              onClick={sendAsk}
+              className="mt-2 font-ui text-[11px] tracking-[0.14em] text-ink-soft uppercase"
+            >
+              Send as a question
+            </button>
+          )}
           <div className="mt-3 flex flex-wrap gap-2">
             {tags.map((t) => {
               const on = highlight.tagIds.includes(t.id);
@@ -129,12 +306,7 @@ export function VoiceThread({
                 <button
                   key={t.id}
                   type="button"
-                  onClick={() => {
-                    const next = on
-                      ? highlight.tagIds.filter((id) => id !== t.id)
-                      : [...highlight.tagIds, t.id];
-                    onTags(next);
-                  }}
+                  onClick={() => toggleTag(t)}
                   className={cn(
                     "border px-2.5 py-1.5 font-ui text-[13px]",
                     on ? "border-ink bg-paper-2" : "border-rule text-ink-soft",
@@ -156,13 +328,7 @@ export function VoiceThread({
                     <button
                       key={name}
                       type="button"
-                      onClick={() => {
-                        if (!tag) return;
-                        const next = on
-                          ? highlight.tagIds.filter((id) => id !== tag.id)
-                          : [...highlight.tagIds, tag.id];
-                        onTags(next);
-                      }}
+                      onClick={() => tag && toggleTag(tag)}
                       className={cn(
                         "border px-2.5 py-1.5 font-ui text-[12px]",
                         on ? "border-ink" : "border-dashed border-rule-strong text-ink-soft",
@@ -214,6 +380,8 @@ export function AnnotationSheet({
   voices,
   suggested,
   userId,
+  prints,
+  printBusy,
   onClose,
   onNote,
   onTags,
@@ -221,12 +389,15 @@ export function AnnotationSheet({
   onDelete,
   autoPlayId,
   onTagsCreated,
+  onPrint,
 }: {
   highlight: Highlight;
   tags: Tag[];
   voices: VoiceNote[];
   suggested: string[];
   userId: string;
+  prints: PrintSlip[];
+  printBusy: string | null;
   onClose: () => void;
   onNote: (note: string) => void;
   onTags: (tagIds: string[]) => void;
@@ -234,6 +405,7 @@ export function AnnotationSheet({
   onDelete: () => void;
   autoPlayId?: string | null;
   onTagsCreated?: () => void;
+  onPrint: (kind: TagKind, force?: boolean, note?: string) => void;
 }) {
   return (
     <div className="absolute inset-x-0 bottom-0 z-20 flex justify-center p-4 pb-5">
@@ -251,6 +423,8 @@ export function AnnotationSheet({
             userId={userId}
             tags={tags}
             suggested={suggested}
+            prints={prints}
+            printBusy={printBusy}
             onNote={onNote}
             onTags={onTags}
             onVoice={onVoice}
@@ -258,6 +432,7 @@ export function AnnotationSheet({
             canDelete={!highlight.isCompanion}
             autoPlayId={autoPlayId}
             onTagsCreated={onTagsCreated}
+            onPrint={onPrint}
           />
         </div>
       </div>

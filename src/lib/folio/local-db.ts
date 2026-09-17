@@ -22,6 +22,7 @@ import {
   type Tag,
   type VoiceNote,
 } from "./types";
+import type { PrintSlip } from "./brushes";
 
 const KEY = "folio.v2";
 
@@ -36,6 +37,7 @@ type DB = {
   voices: VoiceNote[];
   clubs: Club[];
   members: ClubMemberRow[];
+  prints: PrintSlip[];
 };
 
 type ClubMemberRow = ClubMember & { clubId: string };
@@ -139,6 +141,7 @@ function empty(): DB {
     voices: [],
     clubs: [],
     members: [],
+    prints: [],
   };
   seedAlexanderClub(db);
   return db;
@@ -170,6 +173,7 @@ function migrate(parsed: Partial<DB>): DB {
     })),
     clubs: parsed.clubs ?? [],
     members: parsed.members ?? [],
+    prints: parsed.prints ?? [],
   };
   seedAlexanderClub(db);
   return db;
@@ -252,6 +256,7 @@ export const localApi = {
         ),
       ),
       club,
+      prints: db.prints.filter((p) => db.highlights.some((h) => h.id === p.highlightId && h.bookId === bookId)),
     };
   },
   saveProgress(p: Progress) {
@@ -305,6 +310,7 @@ export const localApi = {
     const db = read();
     db.highlights = db.highlights.filter((h) => h.id !== id || h.isCompanion);
     db.voices = db.voices.filter((v) => v.highlightId !== id || v.isCompanion);
+    db.prints = db.prints.filter((p) => p.highlightId !== id);
     write(db);
   },
   addBookmark(b: Omit<Bookmark, "id" | "createdAt">) {
@@ -361,6 +367,12 @@ export const localApi = {
     db.voices.push(row);
     write(db);
     return { id: row.id };
+  },
+  savePrint(print: PrintSlip) {
+    const db = read();
+    db.prints = db.prints.filter((p) => !(p.highlightId === print.highlightId && p.kind === print.kind));
+    db.prints.push(print);
+    write(db);
   },
   loadAllMarks() {
     const db = read();

@@ -28,6 +28,8 @@ import {
   type VoiceNote,
 } from "./types";
 import { stamp } from "./sync-clock";
+import { loadPrintsForBook } from "./print-run.server";
+export { runBrush, savePrint } from "./print-run.server";
 import {
   deleteBookmark as mutDeleteBookmark,
   deleteHighlight as mutDeleteHighlight,
@@ -274,6 +276,7 @@ export async function fetchBookBundle(uid: string, bookId: string) {
         voices: [] as VoiceNote[],
         club: null as Club | null,
         tombstones: [] as Tombstone[],
+        prints: [],
       };
 
     const clubRows = await sql<{
@@ -442,6 +445,7 @@ export async function fetchBookBundle(uid: string, bookId: string) {
       ),
       club,
       tombstones,
+      prints: await loadPrintsForBook(uid, bookId).catch(() => []),
     };
 }
 

@@ -147,6 +147,12 @@ export function SettingsPanel() {
       >
         <Toggle on={s.linkSlide} onChange={(v) => set("linkSlide", v)} />
       </Row>
+      <p className="border-b border-rule py-4 font-serif text-[15px] leading-relaxed text-ink-soft">
+        Tags are programmable highlighters. <em className="text-ink">Book</em> finds the cited work.{" "}
+        <em className="text-ink">Quote</em> prints a skeptical fact-check.{" "}
+        <em className="text-ink">Question</em> sends your note with the page around it. Person, Place, Term, and Idea
+        each print their own slip. The wash on the page stays ink — the tag is the color.
+      </p>
       <Row label="Preview as">
         <Seg
           value={s.device === "auto" ? "dc1" : s.device}

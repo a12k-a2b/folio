@@ -116,6 +116,9 @@ export type Tombstone = {
   updatedAt: string;
 };
 
+export type { PrintSlip, PrintSource } from "./brushes";
+
+
 export type ClubMember = {
   userId: string;
   displayName: string;

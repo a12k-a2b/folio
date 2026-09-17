@@ -57,7 +57,7 @@ export const livingStructure: Book = {
 <p>Mark the sentence, not the vibe. A highlight that spans three pages is a souvenir. A sentence you can lift is a tool.</p>
 <p>Speak the note if the note is a feeling. Feelings die when they have to pass through a keyboard. A voice note saved beside a paragraph is the closest we have to being in the room again. You will hear that you were excited, or confused, or about to cry, and that information is not in the transcript.</p>
 <p>Name people. Books are full of them, and they evaporate. A tag called Person, with a face, is a way of keeping a social world inside a volume.</p>
-<p>When someone recommends a book, tag it as a book, immediately, even if you will not fetch it for a year. Future-you is a librarian with amnesia.</p>
+<p>When someone recommends a book, tag it as a book, immediately, even if you will not fetch it for a year. Future-you is a librarian with amnesia. The tag is not a label. It is a brush: Book finds the work, Quote checks the claim, Question sends what you wrote — with the page around it — to someone who can look.</p>
 <p>Do not build a second brain. Build a first one that you will actually open. The graveyard of read-later apps is full of perfect taxonomies and zero rereading. Folio’s prejudice is toward the next page, and toward the handful of marks that still put a charge in you.</p>
 <blockquote>A pattern that needs a manual is not a pattern. It is a product.</blockquote>
 <p>If you invent a tag, invent it because you have already used the idea three times with your hands, not because a system offered you a blank field. Suggestion can help — a quiet clustering of your marks — but the human names the world. The model only sorts the mail.</p>`,

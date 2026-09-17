@@ -1,6 +1,7 @@
 import { formatMs } from "./voice-pad";
 import { VoiceThread } from "./annotation-sheet";
-import type { Club, Highlight, Tag, VoiceNote } from "@/lib/folio/types";
+import type { PrintSlip } from "@/lib/folio/brushes";
+import type { Club, Highlight, Tag, TagKind, VoiceNote } from "@/lib/folio/types";
 
 export function ClubRail({
   club,
@@ -17,6 +18,9 @@ export function ClubRail({
   onDelete,
   onClose,
   autoPlayId,
+  prints,
+  printBusy,
+  onPrint,
 }: {
   club: Club;
   highlights: Highlight[];
@@ -32,6 +36,9 @@ export function ClubRail({
   onDelete: () => void;
   onClose: () => void;
   autoPlayId?: string | null;
+  prints: PrintSlip[];
+  printBusy: string | null;
+  onPrint: (kind: TagKind, force?: boolean, note?: string) => void;
 }) {
   const voiced = highlights.filter((h) => voices.some((v) => v.highlightId === h.id));
 
@@ -60,12 +67,15 @@ export function ClubRail({
               userId={userId}
               tags={tags}
               suggested={suggested}
+              prints={prints}
+              printBusy={printBusy}
               onNote={onNote}
               onTags={onTags}
               onVoice={onVoice}
               onDelete={onDelete}
               canDelete={!active.isCompanion}
               autoPlayId={autoPlayId}
+              onPrint={onPrint}
             />
           </div>
         ) : voiced.length === 0 ? (

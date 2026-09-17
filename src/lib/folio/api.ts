@@ -27,9 +27,12 @@ import {
   peekArticle,
   defineWord,
   updateHighlight as sUpdateHighlight,
+  runBrush,
+  savePrint,
 } from "./server";
 import { folioAuthed } from "./session-mode";
 import type { Book, FolioSettings, Progress, Tag } from "./types";
+import type { RunBrushInput } from "./brushes";
 
 export { searchGutenberg, suggestClusters, suggestTagsForText, transcribeAudio, peekArticle, defineWord };
 export type { GutenbergHit } from "./server";
@@ -167,3 +170,20 @@ export async function apiJoinClub(v: { code: string; displayName: string }) {
   if (folioAuthed) return sJoinClub({ data: v });
   return localApi.joinClub(v.code, v.displayName);
 }
+
+export async function apiRunBrush(input: RunBrushInput) {
+  const r = await runBrush({ data: input });
+  if (r.ok) {
+    if (folioAuthed) {
+      try {
+        await savePrint({ data: r.print });
+      } catch {
+        /* slip still lives in this session */
+      }
+    } else {
+      localApi.savePrint(r.print);
+    }
+  }
+  return r;
+}
+

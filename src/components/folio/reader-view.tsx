@@ -10,6 +10,7 @@ import {
   apiDeleteBookmark,
   apiDeleteHighlight,
   apiLoadBook,
+  apiRunBrush,
   apiSaveProgress,
   apiSaveVoice,
   apiUpdateHighlight,
@@ -24,6 +25,7 @@ import {
   sliceText,
 } from "@/lib/folio/sentences";
 import { useFolioUi } from "@/lib/folio/store";
+import { primaryBrush, surroundingContext, type PrintSlip } from "@/lib/folio/brushes";
 import {
   DC_HEIGHT,
   DC_WIDTH,
@@ -37,6 +39,7 @@ import {
   type Club,
   type Highlight,
   type Tag,
+  type TagKind,
   type VoiceNote,
 } from "@/lib/folio/types";
 import { AnnotationSheet } from "./annotation-sheet";
@@ -67,6 +70,8 @@ export function ReaderView({ bookId }: { bookId: string }) {
   const [bookmarks, setBookmarks] = useState<BookmarkT[]>([]);
   const [tags, setTags] = useState<Tag[]>([]);
   const [voices, setVoices] = useState<VoiceNote[]>([]);
+  const [prints, setPrints] = useState<PrintSlip[]>([]);
+  const [printBusy, setPrintBusy] = useState<string | null>(null);
   const [club, setClub] = useState<Club | null>(null);
   const [chapterIndex, setChapterIndex] = useState(0);
   const [pageIndex, setPageIndex] = useState(0);
@@ -117,6 +122,15 @@ export function ReaderView({ bookId }: { bookId: string }) {
 
   const chapter = book?.chapters[chapterIndex];
   const voicedIds = useMemo(() => new Set(voices.map((v) => v.highlightId)), [voices]);
+  const brushOf = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const h of highlights) {
+      const kinds = h.tagIds.map((id) => tags.find((t) => t.id === id)?.kind);
+      const k = primaryBrush(kinds);
+      if (k) m.set(h.id, k);
+    }
+    return m;
+  }, [highlights, tags]);
   const pageTerms = useMemo(() => {
     if (!chapter || !settings.gloss) return [] as GlossEntry[];
     return termsInText(chapter.html.replace(/<[^>]+>/g, " ")).filter((t) => !knownGloss.has(t.key));
@@ -134,6 +148,7 @@ export function ReaderView({ bookId }: { bookId: string }) {
     setBookmarks(data.bookmarks);
     setTags(data.tags);
     setVoices(data.voices);
+    setPrints(data.prints ?? []);
     setClub(data.club ?? null);
   }, [bookId]);
 
@@ -179,9 +194,9 @@ export function ReaderView({ bookId }: { bookId: string }) {
     const el = flowRef.current;
     if (!el || !chapter) return;
     const mine = highlights.filter((h) => h.chapterId === chapter.id);
-    applyMarks(el, mine, activeId, voicedIds);
+    applyMarks(el, mine, activeId, voicedIds, brushOf);
     if (draft) applyDraft(el, draft.start, draft.end);
-  }, [highlights, chapter?.id, pageIndex, pageCount, activeId, draft, voices]);
+  }, [highlights, chapter?.id, pageIndex, pageCount, activeId, draft, voices, brushOf]);
 
   useEffect(() => {
     if (!book) return;
@@ -592,6 +607,41 @@ export function ReaderView({ bookId }: { bookId: string }) {
     showToast("Voice kept");
   }
 
+  async function runPrint(kind: TagKind, force = false, noteOverride?: string) {
+    const h = highlights.find((x) => x.id === activeId);
+    if (!h || !book) return;
+    const key = `${h.id}:${kind}`;
+    if (!force && prints.some((p) => p.highlightId === h.id && p.kind === kind)) return;
+    setPrintBusy(key);
+    const full = flowRef.current?.textContent ?? chapter?.html.replace(/<[^>]+>/g, " ") ?? "";
+    const ctx = surroundingContext(full, h.startOffset, h.endOffset);
+    try {
+      const r = await apiRunBrush({
+        kind,
+        passage: h.text,
+        note: noteOverride ?? h.note,
+        context: ctx,
+        bookTitle: book.title,
+        author: book.author,
+        chapterTitle: chapter?.title ?? "",
+        highlightId: h.id,
+        force,
+      });
+      if (!r.ok) {
+        showToast(r.error || "Could not print");
+        return;
+      }
+      setPrints((xs) => {
+        const rest = xs.filter((p) => !(p.highlightId === r.print.highlightId && p.kind === r.print.kind));
+        return [...rest, r.print];
+      });
+    } catch {
+      showToast("The margin is quiet");
+    } finally {
+      setPrintBusy(null);
+    }
+  }
+
   function openFirstVoice() {
     setClubIntro(false);
     try {
@@ -625,6 +675,7 @@ export function ReaderView({ bookId }: { bookId: string }) {
         onDelete: async () => {
           await apiDeleteHighlight(active.id);
           setHighlights((xs) => xs.filter((h) => h.id !== active.id));
+          setPrints((xs) => xs.filter((p) => p.highlightId !== active.id));
           setActive(null);
           showToast("Mark undone");
         },
@@ -755,6 +806,9 @@ export function ReaderView({ bookId }: { bookId: string }) {
           onVoice={threadHandlers.onVoice}
           onDelete={threadHandlers.onDelete}
           autoPlayId={autoPlayId}
+          prints={prints}
+          printBusy={printBusy}
+          onPrint={(kind, force, note) => void runPrint(kind, force, note)}
         />
       )}
 
@@ -778,6 +832,9 @@ export function ReaderView({ bookId }: { bookId: string }) {
           onVoice={async () => {}}
           onDelete={() => {}}
           autoPlayId={autoPlayId}
+          prints={prints}
+          printBusy={printBusy}
+          onPrint={() => {}}
         />
       )}
 
@@ -840,6 +897,9 @@ export function ReaderView({ bookId }: { bookId: string }) {
           onDelete={threadHandlers.onDelete}
           autoPlayId={autoPlayId}
           onTagsCreated={() => void reload()}
+          prints={prints}
+          printBusy={printBusy}
+          onPrint={(kind, force, note) => void runPrint(kind, force, note)}
         />
       )}
 
