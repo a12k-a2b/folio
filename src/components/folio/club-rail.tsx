@@ -20,6 +20,7 @@ export function ClubRail({
   autoPlayId,
   prints,
   printBusy,
+  forceAsk,
   onPrint,
 }: {
   club: Club;
@@ -38,6 +39,7 @@ export function ClubRail({
   autoPlayId?: string | null;
   prints: PrintSlip[];
   printBusy: string | null;
+  forceAsk?: boolean;
   onPrint: (kind: TagKind, force?: boolean, note?: string) => void;
 }) {
   const voiced = highlights.filter((h) => voices.some((v) => v.highlightId === h.id));
@@ -76,6 +78,7 @@ export function ClubRail({
               canDelete={!active.isCompanion}
               autoPlayId={autoPlayId}
               onPrint={onPrint}
+              forceAsk={forceAsk}
             />
           </div>
         ) : voiced.length === 0 ? (

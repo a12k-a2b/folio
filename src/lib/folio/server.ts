@@ -28,8 +28,7 @@ import {
   type VoiceNote,
 } from "./types";
 import { stamp } from "./sync-clock";
-import { loadPrintsForBook } from "./print-run.server";
-export { runBrush, savePrint } from "./print-run.server";
+import type { PrintSlip, RunBrushInput } from "./brushes";
 import {
   deleteBookmark as mutDeleteBookmark,
   deleteHighlight as mutDeleteHighlight,
@@ -445,7 +444,10 @@ export async function fetchBookBundle(uid: string, bookId: string) {
       ),
       club,
       tombstones,
-      prints: await loadPrintsForBook(uid, bookId).catch(() => []),
+      prints: await (async () => {
+        const { loadPrintsForBook } = await import("./print-run.server");
+        return loadPrintsForBook(uid, bookId).catch(() => []);
+      })(),
     };
 }
 
@@ -938,5 +940,21 @@ Nearby: ${data.context || "(none)"}`,
     } catch {
       return { ok: false as const, word: data.word, short: "", long: "", error: "Could not parse" };
     }
+  });
+
+export const runBrush = createServerFn({ method: "POST" })
+  .validator((v: RunBrushInput) => v)
+  .handler(async ({ data }) => {
+    const { executeBrush } = await import("./print-run.server");
+    return executeBrush(data);
+  });
+
+export const savePrint = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((p: PrintSlip) => p)
+  .handler(async ({ context, data: print }) => {
+    const { persistPrint } = await import("./print-run.server");
+    await persistPrint(context.userId, print);
+    return { ok: true as const };
   });
 

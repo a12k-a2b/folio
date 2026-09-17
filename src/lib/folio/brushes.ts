@@ -36,7 +36,7 @@ export const BRUSHES: Record<TagKind, BrushSpec> = {
     verb: "Check",
     kicker: "Skeptical check",
     hint: "Prints a skeptical fact-check of the claim",
-    search: false,
+    search: true,
   },
   question: {
     kind: "question",
@@ -81,6 +81,27 @@ export const BRUSHES: Record<TagKind, BrushSpec> = {
     search: true,
   },
 };
+
+/** The three programmable highlighters — pick one up, then mark. */
+export const PROGRAMMABLE_KINDS: TagKind[] = ["book", "quote", "question"];
+
+export function brushLabel(kind: TagKind): string {
+  if (kind === "book") return "Book";
+  if (kind === "quote") return "Quote";
+  if (kind === "question") return "Question";
+  if (kind === "person") return "Person";
+  if (kind === "place") return "Place";
+  if (kind === "term") return "Term";
+  if (kind === "idea") return "Idea";
+  return "Ask";
+}
+
+export function armedHint(kind: TagKind | null): string {
+  if (kind === "book") return "Tap a citation — it finds and prints the work.";
+  if (kind === "quote") return "Tap a claim — a skeptical check prints.";
+  if (kind === "question") return "Tap a passage, then write what to send.";
+  return "Pick a highlighter, then tap the page.";
+}
 
 const BRUSH_RANK: TagKind[] = [
   "question",
@@ -140,8 +161,8 @@ Reader's note: ${input.note.trim() || "(none)"}
 Surrounding page: ${input.context.slice(0, 1400)}`;
 
   const jobs: Record<TagKind, string> = {
-    book: `JOB: This mark is a citation. Identify the work (book, paper, essay). Title, author, year if known, and why this page is pointing at it. If it is not a citation, say that and name the closest real work.`,
-    quote: `JOB: Treat the marked sentence as a claim. Steelman it in one breath, then a skeptical fact-check: what would have to be true, what evidence cuts against it, what a careful reader should not swallow whole. Not a gotcha. Not a summary.`,
+    book: `JOB: This mark is a citation. Identify the work (book, paper, essay). Title, author, year if known, and why this page is pointing at it. If it is not a citation, say that and name the closest real work. Prefer a real URL in sources (publisher, Wikipedia, Gutenberg, DOI).`,
+    quote: `JOB: Treat the marked sentence as a claim. Steelman it in one breath, then a skeptical fact-check: what would have to be true, what evidence cuts against it, what a careful reader should not swallow whole. Not a gotcha. Not a summary. Use live knowledge; cite sources if you checked.`,
     question: `JOB: The reader circled a comment (or the passage itself) and wants an agent. Answer the note using the marked sentence AND the surrounding page. If the note is empty, pose the question the passage is asking, then answer it.`,
     person: `JOB: Who is this person, in the world of this book? One identifying line, then why they are on this page.`,
     place: `JOB: Situate this place. Where, what kind of room or landscape, why the book stopped here.`,

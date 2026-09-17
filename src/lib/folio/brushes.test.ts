@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  armedHint,
   BRUSHES,
   brushPrompt,
   parsePrintJson,
   primaryBrush,
+  PROGRAMMABLE_KINDS,
   surroundingContext,
 } from "./brushes.ts";
 import { DEFAULT_TAGS } from "./types.ts";
@@ -17,12 +19,14 @@ describe("programmable highlighters", () => {
     }
   });
 
-  it("Book finds, Quote checks, Question asks", () => {
+  it("Book finds, Quote checks, Question asks — and all three search", () => {
     assert.equal(BRUSHES.book.verb, "Find");
     assert.equal(BRUSHES.quote.verb, "Check");
     assert.equal(BRUSHES.question.verb, "Ask");
     assert.equal(BRUSHES.book.search, true);
-    assert.equal(BRUSHES.quote.search, false);
+    assert.equal(BRUSHES.quote.search, true);
+    assert.equal(BRUSHES.question.search, true);
+    assert.deepEqual(PROGRAMMABLE_KINDS, ["book", "quote", "question"]);
   });
 
   it("picks the strongest brush when several tags sit on one mark", () => {
@@ -55,6 +59,7 @@ describe("programmable highlighters", () => {
     assert.match(quote, /fact-check/i);
     const q = brushPrompt({ ...base, kind: "question", note: "Is there more recent work?" });
     assert.match(q, /Is there more recent work/);
+    assert.match(q, /surrounding page/i);
   });
 
   it("parses a print even if the model wraps JSON", () => {
@@ -66,5 +71,11 @@ describe("programmable highlighters", () => {
     assert.equal(slip.title, "The Timeless Way of Building");
     assert.equal(slip.sources[0]?.title, "Wikipedia");
     assert.equal(slip.kind, "book");
+  });
+
+  it("armed hints tell you what the next tap will print", () => {
+    assert.match(armedHint("book"), /citation/i);
+    assert.match(armedHint("quote"), /claim/i);
+    assert.match(armedHint("question"), /write/i);
   });
 });

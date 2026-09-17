@@ -275,7 +275,7 @@ export function LibraryView() {
             <p className="mt-10 max-w-prose font-serif text-sm leading-relaxed text-ink-soft">
               {settings.gloss
                 ? "Gloss is on: tap a word for the teacher’s margin. Hold a link to peek without leaving the page."
-                : "Two taps a word, three a sentence. Hold a link to peek. Hold the microphone when a feeling is faster than a keyboard."}
+                : "Two taps a word, three a sentence. Or pick up Book, Quote, or Question first — then tap. Hold a link to peek. Hold the microphone when a feeling is faster than a keyboard."}
             </p>
             <p className="mt-4 font-ui text-[11px] tracking-wide text-ink-faint uppercase">
               <Link to="/native" className="underline decoration-rule underline-offset-4">

@@ -1,7 +1,5 @@
 import { createHash } from "node:crypto";
-import { createServerFn } from "@tanstack/react-start";
 import { getSql } from "@/lib/db";
-import { authMiddleware } from "@/lib/auth/middleware";
 import { getSessionUser } from "@/lib/auth/verify.server";
 import { BRUSHES, brushPrompt, parsePrintJson, type PrintSlip, type PrintSource, type RunBrushInput } from "./brushes";
 import type { TagKind } from "./types";
@@ -109,7 +107,7 @@ export async function loadPrintsForBook(uid: string, bookId: string): Promise<Pr
   }
 }
 
-async function persist(uid: string, print: PrintSlip) {
+export async function persistPrint(uid: string, print: PrintSlip) {
   const sql = await getSql();
   await sql.query(`
     create table if not exists folio_prints (
@@ -133,95 +131,85 @@ async function persist(uid: string, print: PrintSlip) {
       sources_json = excluded.sources_json`;
 }
 
-export type { RunBrushInput };
+export async function executeBrush(
+  data: RunBrushInput,
+): Promise<{ ok: true; print: PrintSlip; cached: boolean } | { ok: false; error: string }> {
+  const kind: TagKind = BRUSHES[data.kind] ? data.kind : "custom";
+  const spec = BRUSHES[kind];
+  const passage = (data.passage || "").slice(0, 1200);
+  const note = (data.note || "").slice(0, 800);
+  if (!passage.trim()) return { ok: false, error: "Nothing marked" };
 
-export const runBrush = createServerFn({ method: "POST" })
-  .validator((v: RunBrushInput) => v)
-  .handler(async ({ data }): Promise<{ ok: true; print: PrintSlip; cached: boolean } | { ok: false; error: string }> => {
-    const kind: TagKind = BRUSHES[data.kind] ? data.kind : "custom";
-    const spec = BRUSHES[kind];
-    const passage = (data.passage || "").slice(0, 1200);
-    const note = (data.note || "").slice(0, 800);
-    if (!passage.trim()) return { ok: false, error: "Nothing marked" };
+  const key = cacheKey(kind, passage, note);
+  if (!data.force && cache.has(key)) {
+    const cached = { ...cache.get(key)!, highlightId: data.highlightId };
+    return { ok: true, print: cached, cached: true };
+  }
 
-    const key = cacheKey(kind, passage, note);
-    if (!data.force && cache.has(key)) {
-      const cached = { ...cache.get(key)!, highlightId: data.highlightId };
-      return { ok: true, print: cached, cached: true };
-    }
+  let uid: string | null = null;
+  try {
+    const user = await getSessionUser();
+    uid = user?.id ?? null;
+  } catch {
+    uid = null;
+  }
 
-    let uid: string | null = null;
+  if (uid && data.highlightId && !data.force) {
     try {
-      const user = await getSessionUser();
-      uid = user?.id ?? null;
+      const sql = await getSql();
+      const existing = await sql<{
+        id: string;
+        highlight_id: string;
+        tag_kind: string;
+        kicker: string;
+        title: string;
+        body: string;
+        sources_json: string;
+        created_at: string;
+      }>`select id, highlight_id, tag_kind, kicker, title, body, sources_json, created_at
+         from folio_prints
+         where user_id = ${uid} and highlight_id = ${data.highlightId} and tag_kind = ${kind}
+         limit 1`;
+      if (existing[0]) {
+        const print = rowToPrint(existing[0]);
+        cache.set(key, print);
+        return { ok: true, print, cached: true };
+      }
     } catch {
-      uid = null;
+      /* table may not be migrated yet */
     }
+  }
 
-    if (uid && data.highlightId && !data.force) {
+  const apiKey = process.env.XAI_API_KEY;
+  if (!apiKey) return { ok: false, error: "The margin is quiet — printing is not available here." };
+
+  const prompt = brushPrompt({
+    kind,
+    passage,
+    note,
+    context: (data.context || "").slice(0, 1400),
+    bookTitle: (data.bookTitle || "").slice(0, 160),
+    author: (data.author || "").slice(0, 120),
+    chapterTitle: (data.chapterTitle || "").slice(0, 160),
+  });
+
+  try {
+    const result = await chat(apiKey, prompt, spec.search);
+    if (!result.text.trim()) return { ok: false, error: "Nothing came back" };
+    let print = parsePrintJson(result.text, kind, data.highlightId);
+    print = mergeSources(print, result.citations);
+    print.id = crypto.randomUUID();
+    cache.set(key, print);
+    if (uid && data.highlightId) {
       try {
-        const sql = await getSql();
-        const existing = await sql<{
-          id: string;
-          highlight_id: string;
-          tag_kind: string;
-          kicker: string;
-          title: string;
-          body: string;
-          sources_json: string;
-          created_at: string;
-        }>`select id, highlight_id, tag_kind, kicker, title, body, sources_json, created_at
-           from folio_prints
-           where user_id = ${uid} and highlight_id = ${data.highlightId} and tag_kind = ${kind}
-           limit 1`;
-        if (existing[0]) {
-          const print = rowToPrint(existing[0]);
-          cache.set(key, print);
-          return { ok: true, print, cached: true };
-        }
+        await persistPrint(uid, print);
       } catch {
-        /* table may not be migrated yet */
+        /* keep the slip in the session even if the shelf missed it */
       }
     }
-
-    const apiKey = process.env.XAI_API_KEY;
-    if (!apiKey) return { ok: false, error: "The margin is quiet — printing is not available here." };
-
-    const prompt = brushPrompt({
-      kind,
-      passage,
-      note,
-      context: (data.context || "").slice(0, 1400),
-      bookTitle: (data.bookTitle || "").slice(0, 160),
-      author: (data.author || "").slice(0, 120),
-      chapterTitle: (data.chapterTitle || "").slice(0, 160),
-    });
-
-    try {
-      const result = await chat(apiKey, prompt, spec.search);
-      if (!result.text.trim()) return { ok: false, error: "Nothing came back" };
-      let print = parsePrintJson(result.text, kind, data.highlightId);
-      print = mergeSources(print, result.citations);
-      print.id = crypto.randomUUID();
-      cache.set(key, print);
-      if (uid && data.highlightId) {
-        try {
-          await persist(uid, print);
-        } catch {
-          /* keep the slip in the session even if the shelf missed it */
-        }
-      }
-      return { ok: true, print, cached: false };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "print failed";
-      return { ok: false, error: message };
-    }
-  });
-
-export const savePrint = createServerFn({ method: "POST" })
-  .middleware([authMiddleware])
-  .validator((p: PrintSlip) => p)
-  .handler(async ({ context, data: print }) => {
-    await persist(context.userId, print);
-    return { ok: true as const };
-  });
+    return { ok: true, print, cached: false };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "print failed";
+    return { ok: false, error: message };
+  }
+}

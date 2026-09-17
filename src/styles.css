@@ -298,10 +298,19 @@
   to { transform: none; opacity: 1; }
 }
 
+.print-slip {
+  animation: print-out 420ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes print-out {
+  from { transform: translateY(18px); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .peek-enter,
   .sheet-enter,
-  .sidebar-enter {
+  .sidebar-enter,
+  .print-slip {
     animation-duration: 1ms;
   }
 }

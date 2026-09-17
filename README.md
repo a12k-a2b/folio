@@ -40,7 +40,7 @@ npm run build
 
 - Open **Alexander Circle** → *Living Structure*. Tap a marked sentence. Hear Theo. Hold the microphone to reply.
 - Two taps / three taps / four taps / hold-drag on a sentence. Tags apply as you mark.
-- In *How to read a place*, mark **Timeless Way** and tap **Book** — it finds the work. Mark a claim and tap **Quote** for a skeptical check. Write “Is there more recent work?” and tap **Question**.
+- In *How to read a place*, pick up **Book**, then tap **Timeless Way** — it finds the work and prints a slip. Pick up **Quote**, tap a claim, get a skeptical check. Pick up **Question**, tap, write “Is there more recent work?”, send with the page around it.
 - Settings → **Gloss**. Dotted words get a teacher’s note.
 - In *How to read a place*, hold **his name**, **Timeless Way**, or **courtyard**. Peek. Lift. Drag left to keep.
 - Search Gutenberg on the shelf, or upload an EPUB / HTML file.

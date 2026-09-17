@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent } from "react";
 import { Link } from "@tanstack/react-router";
 import { ChevronLeft, Paperclip } from "lucide-react";
 import { cn } from "@/lib/cn";
@@ -25,7 +25,7 @@ import {
   sliceText,
 } from "@/lib/folio/sentences";
 import { useFolioUi } from "@/lib/folio/store";
-import { primaryBrush, surroundingContext, type PrintSlip } from "@/lib/folio/brushes";
+import { primaryBrush, surroundingContext, BRUSHES, type PrintSlip } from "@/lib/folio/brushes";
 import {
   DC_HEIGHT,
   DC_WIDTH,
@@ -43,6 +43,7 @@ import {
   type VoiceNote,
 } from "@/lib/folio/types";
 import { AnnotationSheet } from "./annotation-sheet";
+import { BrushWell } from "./brush-well";
 import { ClubIntro, ClubRail } from "./club-rail";
 import { useFolio } from "./folio-state";
 import { GlossCard, GlossMargin } from "./gloss-margin";
@@ -72,6 +73,8 @@ export function ReaderView({ bookId }: { bookId: string }) {
   const [voices, setVoices] = useState<VoiceNote[]>([]);
   const [prints, setPrints] = useState<PrintSlip[]>([]);
   const [printBusy, setPrintBusy] = useState<string | null>(null);
+  const [armedBrush, setArmedBrush] = useState<TagKind | null>(null);
+  const [askOpenId, setAskOpenId] = useState<string | null>(null);
   const [club, setClub] = useState<Club | null>(null);
   const [chapterIndex, setChapterIndex] = useState(0);
   const [pageIndex, setPageIndex] = useState(0);
@@ -101,6 +104,10 @@ export function ReaderView({ bookId }: { bookId: string }) {
   const linkHold = useRef<number>(0);
   const pointer = useRef({ x: 0, y: 0, t: 0, down: false });
   const draftRaf = useRef(0);
+  const lastStroke = useRef(0);
+  const armedRef = useRef<TagKind | null>(null);
+  const strokeRef = useRef<(x: number, y: number) => boolean>(() => false);
+  armedRef.current = armedBrush;
 
   const tablet = device === "dc1";
   const screenW = tablet ? DC_WIDTH : PHONE_WIDTH;
@@ -336,6 +343,7 @@ export function ReaderView({ bookId }: { bookId: string }) {
     );
     if (overlap) {
       setActive(overlap.id);
+      if (armedBrush) applyBrush(overlap, armedBrush);
       return;
     }
     const res = await apiAddHighlight({
@@ -365,29 +373,40 @@ export function ReaderView({ bookId }: { bookId: string }) {
     setActive(res.id);
     setDraft(null);
     dismissHint();
-    const localNames = suggestTagsLocal(slice, tags);
-    const localIds = tagIdsFromNames(localNames, tags);
-    if (localIds.length) {
-      h.tagIds = localIds;
-      setHighlights((xs) => xs.map((x) => (x.id === res.id ? { ...x, tagIds: localIds } : x)));
-      void apiUpdateHighlight({ id: res.id, tagIds: localIds });
-    }
-    showToast("Marked · hold the mic to speak", async () => {
+    const undo = async () => {
       await apiDeleteHighlight(res.id);
       setHighlights((xs) => xs.filter((x) => x.id !== res.id));
+      setPrints((xs) => xs.filter((p) => p.highlightId !== res.id));
       setActive(null);
-    });
-    void suggestTagsForText({ data: slice })
-      .then((r) => {
-        setSuggested(r.names);
-        const extra = tagIdsFromNames(r.names, tags);
-        if (extra.length) {
-          const merged = [...new Set([...(localIds.length ? localIds : h.tagIds), ...extra])];
-          void apiUpdateHighlight({ id: res.id, tagIds: merged });
-          setHighlights((xs) => xs.map((x) => (x.id === res.id ? { ...x, tagIds: merged } : x)));
-        }
-      })
-      .catch(() => setSuggested(localNames));
+    };
+    if (armedBrush) {
+      applyBrush(h, armedBrush);
+      const spec = BRUSHES[armedBrush];
+      showToast(
+        armedBrush === "question" ? "Write the question, then send" : `${spec.kicker} — printing…`,
+        undo,
+      );
+    } else {
+      const localNames = suggestTagsLocal(slice, tags);
+      const localIds = tagIdsFromNames(localNames, tags);
+      if (localIds.length) {
+        h.tagIds = localIds;
+        setHighlights((xs) => xs.map((x) => (x.id === res.id ? { ...x, tagIds: localIds } : x)));
+        void apiUpdateHighlight({ id: res.id, tagIds: localIds });
+      }
+      showToast("Marked · hold the mic to speak", undo);
+      void suggestTagsForText({ data: slice })
+        .then((r) => {
+          setSuggested(r.names);
+          const extra = tagIdsFromNames(r.names, tags);
+          if (extra.length) {
+            const merged = [...new Set([...(localIds.length ? localIds : h.tagIds), ...extra])];
+            void apiUpdateHighlight({ id: res.id, tagIds: merged });
+            setHighlights((xs) => xs.map((x) => (x.id === res.id ? { ...x, tagIds: merged } : x)));
+          }
+        })
+        .catch(() => setSuggested(localNames));
+    }
   }
 
   const active = highlights.find((h) => h.id === activeId) ?? null;
@@ -399,7 +418,7 @@ export function ReaderView({ bookId }: { bookId: string }) {
     selectRef.current = null;
     const target = e.target as Element;
     const link = target.closest("a");
-    if (link && settings.linkSlide) {
+    if (link && settings.linkSlide && !armedBrush) {
       const href = (link as HTMLAnchorElement).getAttribute("href") || (link as HTMLAnchorElement).href;
       linkHold.current = window.setTimeout(() => {
         if (href) {
@@ -461,10 +480,26 @@ export function ReaderView({ bookId }: { bookId: string }) {
 
     const hid = highlightIdFromTarget(e.target);
     if (hid) {
+      const existing = highlights.find((x) => x.id === hid);
+      if (existing && armedBrush) {
+        applyBrush(existing, armedBrush);
+        return;
+      }
       setActive(hid);
       setChrome(true);
       const firstVoice = voices.find((v) => v.highlightId === hid);
       setAutoPlayId(firstVoice?.id ?? null);
+      return;
+    }
+
+    if (armedBrush) {
+      if (strokeAt(e.clientX, e.clientY)) return;
+      const rectArmed = stageRef.current?.getBoundingClientRect();
+      if (rectArmed) {
+        const local = e.clientX - rectArmed.left;
+        if (local < rectArmed.width * 0.22) go(-1);
+        else if (local > rectArmed.width * 0.78) go(1);
+      }
       return;
     }
 
@@ -607,8 +642,8 @@ export function ReaderView({ bookId }: { bookId: string }) {
     showToast("Voice kept");
   }
 
-  async function runPrint(kind: TagKind, force = false, noteOverride?: string) {
-    const h = highlights.find((x) => x.id === activeId);
+  async function runPrint(kind: TagKind, force = false, noteOverride?: string, highlight?: Highlight) {
+    const h = highlight ?? highlights.find((x) => x.id === activeId);
     if (!h || !book) return;
     const key = `${h.id}:${kind}`;
     if (!force && prints.some((p) => p.highlightId === h.id && p.kind === kind)) return;
@@ -641,6 +676,70 @@ export function ReaderView({ bookId }: { bookId: string }) {
       setPrintBusy(null);
     }
   }
+
+  function applyBrush(h: Highlight, kind: TagKind, note?: string) {
+    const tag = tags.find((t) => t.kind === kind);
+    let next = h;
+    if (tag && !h.tagIds.includes(tag.id)) {
+      const tagIds = [...h.tagIds, tag.id];
+      next = { ...h, tagIds };
+      setHighlights((xs) => xs.map((x) => (x.id === h.id ? next : x)));
+      void apiUpdateHighlight({ id: h.id, tagIds });
+    }
+    setActive(next.id);
+    setChrome(true);
+    if (kind === "question" && !(note ?? next.note).trim()) {
+      setAskOpenId(next.id);
+      return;
+    }
+    setAskOpenId(null);
+    void runPrint(kind, false, note, next);
+  }
+
+  function strokeAt(clientX: number, clientY: number): boolean {
+    if (!armedBrush) return false;
+    const now = Date.now();
+    if (now - lastStroke.current < 280) return true;
+    const root = flowRef.current;
+    if (!root) return false;
+    const hid = highlightIdFromTarget(document.elementFromPoint(clientX, clientY));
+    if (hid) {
+      const existing = highlights.find((x) => x.id === hid);
+      if (existing) {
+        lastStroke.current = now;
+        applyBrush(existing, armedBrush);
+        return true;
+      }
+    }
+    const off = offsetFromPoint(root, clientX, clientY);
+    if (off == null) return false;
+    const span = expandToSentenceEl(root, off);
+    if (span.end <= span.start) return false;
+    lastStroke.current = now;
+    void markRange(span.start, span.end);
+    return true;
+  }
+
+  function onStageClick(e: MouseEvent) {
+    if (!armedBrush) return;
+    e.preventDefault();
+    strokeAt(e.clientX, e.clientY);
+  }
+
+  strokeRef.current = strokeAt;
+
+  useLayoutEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const onClick = (ev: Event) => {
+      if (!armedRef.current) return;
+      ev.preventDefault();
+      const me = ev as globalThis.MouseEvent;
+      strokeRef.current(me.clientX, me.clientY);
+    };
+    el.addEventListener("click", onClick, true);
+    return () => el.removeEventListener("click", onClick, true);
+  }, [chapter?.id, pageIndex]);
 
   function openFirstVoice() {
     setClubIntro(false);
@@ -731,6 +830,7 @@ export function ReaderView({ bookId }: { bookId: string }) {
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
+        onClickCapture={onStageClick}
       >
         <div
           ref={flowRef}
@@ -762,14 +862,38 @@ export function ReaderView({ bookId }: { bookId: string }) {
       </div>
 
       {!tablet && (
-        <footer className="absolute inset-x-0 bottom-0 flex flex-col items-center justify-center px-6" style={{ height: botPad }}>
-          {hint && <div className="font-ui text-[11px] tracking-wide text-ink-faint">Two taps a word · three a sentence</div>}
-          <div className="font-ui text-[12px] tracking-[0.14em] text-ink-faint tabular-nums">{totalPagesHint}</div>
+        <footer className="absolute inset-x-0 bottom-0 flex flex-col items-center justify-center gap-1 px-4" style={{ height: botPad }}>
+          {(chrome || armedBrush) && (
+            <BrushWell
+              armed={armedBrush}
+              onArm={setArmedBrush}
+              busyKind={printBusy?.split(":")[1] ?? null}
+            />
+          )}
+          {!armedBrush && hint && (
+            <div className="font-ui text-[11px] tracking-wide text-ink-faint">Two taps a word · three a sentence</div>
+          )}
+          {!armedBrush && !hint && (
+            <div className="font-ui text-[12px] tracking-[0.14em] text-ink-faint tabular-nums">{totalPagesHint}</div>
+          )}
         </footer>
       )}
 
       {tablet && (
-        <ThumbBar
+        <>
+          {(chrome || armedBrush) && (
+            <div
+              className="pointer-events-none absolute z-10 flex justify-center px-4"
+              style={{ left: 0, right: rail, bottom: botPad + 8 }}
+            >
+              <BrushWell
+                armed={armedBrush}
+                onArm={setArmedBrush}
+                busyKind={printBusy?.split(":")[1] ?? null}
+              />
+            </div>
+          )}
+          <ThumbBar
             label={totalPagesHint}
             canPrev={canPrev}
             canNext={canNext}
@@ -784,6 +908,7 @@ export function ReaderView({ bookId }: { bookId: string }) {
             micArmed={Boolean(active)}
             rightOffset={rail}
           />
+        </>
       )}
 
       {club && tablet && threadHandlers && (
@@ -808,7 +933,8 @@ export function ReaderView({ bookId }: { bookId: string }) {
           autoPlayId={autoPlayId}
           prints={prints}
           printBusy={printBusy}
-          onPrint={(kind, force, note) => void runPrint(kind, force, note)}
+          forceAsk={askOpenId === active?.id}
+          onPrint={(kind, force, note) => void runPrint(kind, force, note, active ?? undefined)}
         />
       )}
 
@@ -899,7 +1025,8 @@ export function ReaderView({ bookId }: { bookId: string }) {
           onTagsCreated={() => void reload()}
           prints={prints}
           printBusy={printBusy}
-          onPrint={(kind, force, note) => void runPrint(kind, force, note)}
+          forceAsk={askOpenId === active?.id}
+          onPrint={(kind, force, note) => void runPrint(kind, force, note, active ?? undefined)}
         />
       )}
 

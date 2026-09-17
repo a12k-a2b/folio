@@ -32,7 +32,7 @@ function PrintCard({
   }, [slip.kind, slip.title]);
 
   return (
-    <article className="mt-4 border border-rule bg-paper-2 px-3 py-3">
+    <article className="print-slip mt-4 border border-rule bg-paper-2 px-3 py-3">
       <div className="font-ui text-[10px] tracking-[0.16em] text-ink-soft uppercase">{slip.kicker}</div>
       <h3 className="mt-1 font-serif text-[18px] leading-snug">{slip.title}</h3>
       <div className="mt-2 space-y-2 font-serif text-[15px] leading-relaxed text-ink">
@@ -103,6 +103,7 @@ export function VoiceThread({
   autoPlayId,
   onTagsCreated,
   onPrint,
+  forceAsk,
 }: {
   highlight: Highlight;
   voices: VoiceNote[];
@@ -119,12 +120,13 @@ export function VoiceThread({
   autoPlayId?: string | null;
   onTagsCreated?: () => void;
   onPrint: (kind: TagKind, force?: boolean, note?: string) => void;
+  forceAsk?: boolean;
 }) {
   const [note, setNote] = useState(highlight.note);
   const [busy, setBusy] = useState(false);
-  const [more, setMore] = useState(highlight.tagIds.length > 0 || Boolean(highlight.note) || prints.length > 0);
+  const [more, setMore] = useState(highlight.tagIds.length > 0 || Boolean(highlight.note) || prints.length > 0 || forceAsk);
   const [newTag, setNewTag] = useState("");
-  const [askOpen, setAskOpen] = useState(false);
+  const [askOpen, setAskOpen] = useState(Boolean(forceAsk));
   const noteRef = useRef<HTMLTextAreaElement>(null);
   const mine = voices
     .filter((v) => v.highlightId === highlight.id)
@@ -134,6 +136,14 @@ export function VoiceThread({
   useEffect(() => {
     setNote(highlight.note);
   }, [highlight.id, highlight.note]);
+
+  useEffect(() => {
+    if (forceAsk) {
+      setAskOpen(true);
+      setMore(true);
+      window.setTimeout(() => noteRef.current?.focus(), 40);
+    }
+  }, [forceAsk, highlight.id]);
 
   async function makeTag() {
     const name = newTag.trim();
@@ -390,6 +400,7 @@ export function AnnotationSheet({
   autoPlayId,
   onTagsCreated,
   onPrint,
+  forceAsk,
 }: {
   highlight: Highlight;
   tags: Tag[];
@@ -406,6 +417,7 @@ export function AnnotationSheet({
   autoPlayId?: string | null;
   onTagsCreated?: () => void;
   onPrint: (kind: TagKind, force?: boolean, note?: string) => void;
+  forceAsk?: boolean;
 }) {
   return (
     <div className="absolute inset-x-0 bottom-0 z-20 flex justify-center p-4 pb-5">
@@ -433,6 +445,7 @@ export function AnnotationSheet({
             autoPlayId={autoPlayId}
             onTagsCreated={onTagsCreated}
             onPrint={onPrint}
+            forceAsk={forceAsk}
           />
         </div>
       </div>
